@@ -1,0 +1,17 @@
+# Virtual environment
+venv/
+.venv/
+
+# Generated files
+examples/demo/charts/
+examples/demo/forecast_results.json
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db

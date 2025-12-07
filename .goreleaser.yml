@@ -1,0 +1,69 @@
+version: 2
+
+before:
+  hooks:
+    - go mod tidy
+    - go generate ./...
+
+builds:
+  - skip: true  # This is a library, no binaries to build
+
+archives:
+  - format: tar.gz
+    name_template: >-
+      {{ .ProjectName }}_
+      {{- title .Os }}_
+      {{- if eq .Arch "amd64" }}x86_64
+      {{- else if eq .Arch "386" }}i386
+      {{- else }}{{ .Arch }}{{ end }}
+      {{- if .Arm }}v{{ .Arm }}{{ end }}
+
+changelog:
+  sort: asc
+  use: github
+  filters:
+    exclude:
+      - '^docs:'
+      - '^test:'
+      - '^chore:'
+      - '^ci:'
+      - Merge pull request
+      - Merge branch
+  groups:
+    - title: '🚀 Features'
+      regexp: '^.*?feat(\([[:word:]]+\))??!?:.+$'
+      order: 0
+    - title: '🐛 Bug Fixes'
+      regexp: '^.*?fix(\([[:word:]]+\))??!?:.+$'
+      order: 1
+    - title: '📚 Documentation'
+      regexp: '^.*?docs(\([[:word:]]+\))??!?:.+$'
+      order: 2
+    - title: '🔧 Maintenance'
+      order: 999
+
+release:
+  github:
+    owner: sartorproj
+    name: goarima
+  
+  prerelease: auto
+  
+  header: |
+    ## GoARIMA {{ .Tag }}
+    
+    ARIMA, SARIMA, and Auto-ARIMA time series modeling for Go.
+  
+  footer: |
+    ---
+    
+    ### Installation
+    
+    ```bash
+    go get github.com/sartorproj/goarima@{{ .Tag }}
+    ```
+    
+    **Full Changelog**: https://github.com/sartorproj/goarima/compare/{{ .PreviousTag }}...{{ .Tag }}
+
+announce:
+  skip: true
