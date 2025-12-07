@@ -18,9 +18,9 @@ def load_data(json_file="forecast_results.json"):
 
 def create_forecast_chart(data):
     """Create forecast comparison chart."""
-    
+
     fig = go.Figure()
-    
+
     # Training data
     fig.add_trace(go.Scatter(
         x=data['train_index'],
@@ -31,7 +31,7 @@ def create_forecast_chart(data):
         marker=dict(size=4),
         hovertemplate='Period: %{x}<br>Value: %{y:.2f}<extra>Training</extra>'
     ))
-    
+
     # Test data (actual)
     fig.add_trace(go.Scatter(
         x=data['test_index'],
@@ -42,7 +42,7 @@ def create_forecast_chart(data):
         marker=dict(size=8, symbol='circle'),
         hovertemplate='Period: %{x}<br>Value: %{y:.2f}<extra>Actual</extra>'
     ))
-    
+
     # Model forecasts
     colors = ['#ef4444', '#f97316', '#8b5cf6', '#06b6d4', '#84cc16', '#ec4899']
     for i, model in enumerate(data['models']):
@@ -56,13 +56,13 @@ def create_forecast_chart(data):
             marker=dict(size=6, symbol='diamond'),
             hovertemplate='Period: %{x}<br>Forecast: %{y:.2f}<extra>' + model['model_name'] + '</extra>'
         ))
-    
+
     # Add train/test split line
     if data['train_index']:
         split_x = data['train_index'][-1]
         fig.add_vline(x=split_x, line_dash="dot", line_color="gray",
                      annotation_text="Train/Test Split", annotation_position="top")
-    
+
     fig.update_layout(
         title='Forecast Comparison',
         xaxis_title='Time Period',
@@ -73,16 +73,16 @@ def create_forecast_chart(data):
         height=450,
         margin=dict(t=80, b=50)
     )
-    
+
     return fig
 
 
 def create_metrics_table(data):
     """Create metrics comparison table."""
-    
+
     models = data['models']
     has_aicc = 'aicc' in models[0] if models else False
-    
+
     if has_aicc:
         headers = ['Model', 'AIC', 'AICc', 'BIC', 'RMSE', 'MAE', 'MAPE']
         values = [
@@ -104,7 +104,7 @@ def create_metrics_table(data):
             [f"{m['mae']:.4f}" for m in models],
             [f"{m['mape']:.2f}%" for m in models],
         ]
-    
+
     fig = go.Figure(data=[go.Table(
         header=dict(
             values=[f'<b>{h}</b>' for h in headers],
@@ -121,23 +121,23 @@ def create_metrics_table(data):
             height=30
         )
     )])
-    
+
     fig.update_layout(
         title='Model Performance Metrics',
         height=150 + len(models) * 35,
         margin=dict(t=50, b=20, l=20, r=20)
     )
-    
+
     return fig
 
 
 def create_stationarity_table(data):
     """Create stationarity analysis table."""
-    
+
     stationarity = data.get('stationarity', {})
     if not stationarity:
         return None
-    
+
     rows = []
     if 'adf_statistic' in stationarity:
         rows.append(['ADF Test', f"{stationarity['adf_statistic']:.4f}",
@@ -153,14 +153,14 @@ def create_stationarity_table(data):
         rows.append(['nsdiffs (recommended)', str(stationarity['nsdiffs']), '-', f"D = {stationarity['nsdiffs']}"])
     if 'ljungbox_pvalue' in stationarity:
         is_wn = stationarity.get('residuals_white_noise', stationarity['ljungbox_pvalue'] >= 0.05)
-        rows.append(['Ljung-Box (residuals)', '-', f"{stationarity['ljungbox_pvalue']:.4f}", 
+        rows.append(['Ljung-Box (residuals)', '-', f"{stationarity['ljungbox_pvalue']:.4f}",
                     '✓ White Noise' if is_wn else '✗ Autocorrelated'])
-    
+
     if not rows:
         return None
-    
+
     values = list(zip(*rows))
-    
+
     fig = go.Figure(data=[go.Table(
         header=dict(
             values=['<b>Test</b>', '<b>Statistic</b>', '<b>P-Value</b>', '<b>Result</b>'],
@@ -177,45 +177,45 @@ def create_stationarity_table(data):
             height=30
         )
     )])
-    
+
     fig.update_layout(
         title='Stationarity Analysis',
         height=150 + len(rows) * 35,
         margin=dict(t=50, b=20, l=20, r=20)
     )
-    
+
     return fig
 
 
 def create_residual_chart(data):
     """Create residual analysis chart for all models."""
-    
+
     models = data['models']
     test_data = data['test_data']
     n_models = len(models)
-    
+
     if n_models == 0:
         return None
-    
+
     fig = make_subplots(
         rows=n_models, cols=2,
-        subplot_titles=[item for m in models for item in 
-                       [f"{m['model_name']}{m['order']} - Residuals", 
+        subplot_titles=[item for m in models for item in
+                       [f"{m['model_name']}{m['order']} - Residuals",
                         f"{m['model_name']}{m['order']} - Distribution"]],
         horizontal_spacing=0.1,
         vertical_spacing=0.15
     )
-    
+
     colors = ['#ef4444', '#f97316', '#8b5cf6', '#06b6d4', '#84cc16', '#ec4899']
-    
+
     for i, model in enumerate(models):
         row = i + 1
         color = colors[i % len(colors)]
-        
+
         # Calculate residuals
         min_len = min(len(test_data), len(model['forecasts']))
         residuals = [test_data[j] - model['forecasts'][j] for j in range(min_len)]
-        
+
         # Residuals over time
         fig.add_trace(go.Scatter(
             x=list(range(1, len(residuals) + 1)),
@@ -226,7 +226,7 @@ def create_residual_chart(data):
             showlegend=False,
             hovertemplate='Period: %{x}<br>Residual: %{y:.4f}<extra></extra>'
         ), row=row, col=1)
-        
+
         # Add zero line as a shape
         fig.add_shape(
             type="line",
@@ -235,7 +235,7 @@ def create_residual_chart(data):
             line=dict(color="gray", width=1, dash="dash"),
             row=row, col=1
         )
-        
+
         # Histogram
         fig.add_trace(go.Histogram(
             x=residuals,
@@ -243,35 +243,35 @@ def create_residual_chart(data):
             opacity=0.7,
             showlegend=False
         ), row=row, col=2)
-    
+
     fig.update_layout(
         title='Residual Analysis',
         height=250 * n_models,
         template='plotly_white',
         margin=dict(t=80, b=50)
     )
-    
+
     return fig
 
 
 def create_dashboard_html(data, output_file):
     """Create a single HTML file with all charts."""
-    
+
     dataset_name = data.get('name', 'Time Series Analysis')
     description = data.get('description', '')
-    
+
     # Create individual figures
     forecast_fig = create_forecast_chart(data)
     metrics_fig = create_metrics_table(data)
     stationarity_fig = create_stationarity_table(data)
     residual_fig = create_residual_chart(data)
-    
+
     # Convert to HTML divs
     forecast_html = forecast_fig.to_html(full_html=False, include_plotlyjs=False)
     metrics_html = metrics_fig.to_html(full_html=False, include_plotlyjs=False)
     stationarity_html = stationarity_fig.to_html(full_html=False, include_plotlyjs=False) if stationarity_fig else ""
     residual_html = residual_fig.to_html(full_html=False, include_plotlyjs=False) if residual_fig else ""
-    
+
     # Create combined HTML
     html_content = f"""<!DOCTYPE html>
 <html>
@@ -337,11 +337,11 @@ def create_dashboard_html(data, output_file):
             <h1>{dataset_name}</h1>
             <p>{description}</p>
         </div>
-        
+
         <div class="chart-section">
             {forecast_html}
         </div>
-        
+
         <div class="tables-row">
             <div class="chart-section">
                 {metrics_html}
@@ -350,73 +350,73 @@ def create_dashboard_html(data, output_file):
                 {stationarity_html if stationarity_html else "<p style='text-align:center;color:#94a3b8;'>No stationarity analysis available</p>"}
             </div>
         </div>
-        
+
         <div class="chart-section">
             {residual_html if residual_html else "<p style='text-align:center;color:#94a3b8;'>No residual analysis available</p>"}
         </div>
-        
+
         <div class="footer">
             Generated by GoARIMA | <a href="https://otexts.com/fpppy/nbs/09-arima.html">Reference: Forecasting: Principles and Practice</a>
         </div>
     </div>
 </body>
 </html>"""
-    
+
     with open(output_file, 'w') as f:
         f.write(html_content)
 
 
 def main():
     """Main function to generate visualizations."""
-    
+
     print("=" * 60)
     print("GoARIMA Visualization with Python Plotly")
     print("=" * 60)
-    
+
     # Load data
     json_file = "forecast_results.json"
     if not os.path.exists(json_file):
         print(f"\nError: {json_file} not found!")
         print("Run the Go demo first: go run .")
         return
-    
+
     print(f"\nLoading data from {json_file}...")
     raw_data = load_data(json_file)
-    
+
     # Create output directory
     output_dir = "charts"
     os.makedirs(output_dir, exist_ok=True)
-    
+
     # Clear old files
     for f in os.listdir(output_dir):
         if f.endswith('.html'):
             os.remove(os.path.join(output_dir, f))
-    
+
     # Check format
     if 'datasets' in raw_data:
         datasets = raw_data['datasets']
     else:
         datasets = [raw_data]
-    
+
     print(f"Found {len(datasets)} dataset(s)")
-    
+
     generated_files = []
-    
+
     for i, dataset in enumerate(datasets):
         dataset_name = dataset.get('name', f'Dataset_{i+1}')
         safe_name = dataset_name.lower().replace(' ', '_').replace('(', '').replace(')', '')
-        
+
         print(f"\nProcessing: {dataset_name}")
         print(f"  - Training: {len(dataset['train_data'])} points")
         print(f"  - Test: {len(dataset['test_data'])} points")
         print(f"  - Models: {len(dataset['models'])}")
-        
+
         # Create dashboard HTML
         filename = f"{output_dir}/{i+1}_{safe_name}.html"
         create_dashboard_html(dataset, filename)
         generated_files.append(filename)
         print(f"  ✓ Saved: {filename}")
-    
+
     print("\n" + "=" * 60)
     print("Visualization complete!")
     print("=" * 60)

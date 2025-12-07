@@ -46,23 +46,23 @@ release:
   github:
     owner: sartorproj
     name: goarima
-  
+
   prerelease: auto
-  
+
   header: |
     ## GoARIMA {{ .Tag }}
-    
+
     ARIMA, SARIMA, and Auto-ARIMA time series modeling for Go.
-  
+
   footer: |
     ---
-    
+
     ### Installation
-    
+
     ```bash
     go get github.com/sartorproj/goarima@{{ .Tag }}
     ```
-    
+
     **Full Changelog**: https://github.com/sartorproj/goarima/compare/{{ .PreviousTag }}...{{ .Tag }}
 
 announce:

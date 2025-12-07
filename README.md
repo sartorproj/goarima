@@ -15,7 +15,7 @@ A comprehensive Go package implementing ARIMA, SARIMA, and Auto-ARIMA time serie
 - **ARIMA Models**: AutoRegressive Integrated Moving Average models
 - **SARIMA Models**: Seasonal ARIMA for data with periodic patterns
 - **Auto-ARIMA**: Automatic model selection using information criteria (AIC/AICc/BIC)
-- **Statistical Tests**: 
+- **Statistical Tests**:
   - Augmented Dickey-Fuller (ADF) test for unit root
   - KPSS test for stationarity
   - Phillips-Perron test for unit root
@@ -98,13 +98,13 @@ func main() {
     if err != nil {
         panic(err)
     }
-    
+
     // Load with filtering (e.g., specific country/series)
     series, err = timeseries.LoadCSVFiltered(
         "demo/data/aus_economy.csv",
         "unique_id", "Australia", "y",
     )
-    
+
     fmt.Printf("Loaded %d observations\n", series.Len())
 }
 ```
@@ -122,12 +122,12 @@ import (
 
 func main() {
     series := timeseries.New(values)
-    
+
     // Determine number of differences needed for stationarity
     // Uses KPSS test by default
     d := stats.NDiffs(series, 2, "kpss")
     fmt.Printf("Recommended first differences: %d\n", d)
-    
+
     // For seasonal data, determine seasonal differencing
     // Uses seasonal strength measure (F_S >= 0.64 suggests differencing)
     sd := stats.NSDiffs(series, 12, 1) // period=12 for monthly data
@@ -160,7 +160,7 @@ func main() {
 
     // Get model summary with AIC, AICc, BIC
     summary := model.Summary()
-    fmt.Printf("AIC: %.2f, AICc: %.2f, BIC: %.2f\n", 
+    fmt.Printf("AIC: %.2f, AICc: %.2f, BIC: %.2f\n",
         summary.AIC, summary.AICc, summary.BIC)
     fmt.Printf("AR coefficients: %v\n", summary.ARCoeffs)
 
@@ -230,7 +230,7 @@ func main() {
 
     // Find best model
     result, _ := autoarima.AutoARIMA(series, config)
-    
+
     fmt.Printf("Best model: ARIMA(%d,%d,%d)\n", result.P, result.D, result.Q)
     fmt.Printf("AIC: %.2f, Models evaluated: %d\n", result.AIC, result.ModelsEvaluated)
 
