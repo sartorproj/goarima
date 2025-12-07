@@ -52,7 +52,7 @@ func NDiffs(series *timeseries.Series, maxD int, testType string) int {
 // NSDiffs determines the number of seasonal differences required.
 // Uses seasonal strength measure: if F_S >= 0.64, one seasonal difference is suggested.
 // period is the seasonal period (e.g., 12 for monthly data with yearly seasonality).
-func NSDiffs(series *timeseries.Series, period int, maxD int) int {
+func NSDiffs(series *timeseries.Series, period, maxD int) int {
 	if maxD <= 0 {
 		maxD = 1
 	}
@@ -153,7 +153,7 @@ func variance(data []float64) float64 {
 // AICc calculates the corrected Akaike Information Criterion.
 // AICc = AIC + 2(k)(k+1)/(n-k-1) where k is number of parameters.
 // This corrects for small sample sizes.
-func AICc(aic float64, nObs int, nParams int) float64 {
+func AICc(aic float64, nObs, nParams int) float64 {
 	k := float64(nParams)
 	n := float64(nObs)
 
@@ -176,7 +176,7 @@ type InformationCriteria struct {
 // CalculateIC calculates all information criteria.
 // logLik is the log-likelihood, nObs is the number of observations,
 // nParams is the number of estimated parameters.
-func CalculateIC(logLik float64, nObs int, nParams int) *InformationCriteria {
+func CalculateIC(logLik float64, nObs, nParams int) *InformationCriteria {
 	k := float64(nParams)
 	n := float64(nObs)
 

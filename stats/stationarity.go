@@ -328,7 +328,7 @@ func PhillipsPerron(series *timeseries.Series, nlags int) *PhillipsPerronResult 
 
 // olsRegression performs ordinary least squares regression.
 // Returns coefficients and their standard errors.
-func olsRegression(x [][]float64, y []float64) ([]float64, []float64) {
+func olsRegression(x [][]float64, y []float64) (coeffs, stdErrors []float64) {
 	n := len(y)
 	if n == 0 || len(x) != n {
 		return nil, nil
@@ -360,7 +360,7 @@ func olsRegression(x [][]float64, y []float64) ([]float64, []float64) {
 	}
 
 	// Calculate coefficients: beta = (X'X)^-1 X'y
-	coeffs := make([]float64, k)
+	coeffs = make([]float64, k)
 	for i := 0; i < k; i++ {
 		for j := 0; j < k; j++ {
 			coeffs[i] += xtxInv[i][j] * xty[j]
@@ -384,12 +384,12 @@ func olsRegression(x [][]float64, y []float64) ([]float64, []float64) {
 	}
 
 	s2 := sse / float64(n-k)
-	se := make([]float64, k)
+	stdErrors = make([]float64, k)
 	for i := 0; i < k; i++ {
-		se[i] = math.Sqrt(s2 * xtxInv[i][i])
+		stdErrors[i] = math.Sqrt(s2 * xtxInv[i][i])
 	}
 
-	return coeffs, se
+	return coeffs, stdErrors
 }
 
 // invertMatrix inverts a square matrix using Gauss-Jordan elimination.
@@ -457,21 +457,23 @@ func mackinnonPValue(stat float64, _ int, _ string) float64 {
 	// For "c" (constant only) regression
 
 	// Asymptotic critical values interpolation
-	if stat < -3.96 {
+	switch {
+	case stat < -3.96:
 		return 0.001
-	} else if stat < -3.43 {
+	case stat < -3.43:
 		return 0.01
-	} else if stat < -2.86 {
+	case stat < -2.86:
 		return 0.05
-	} else if stat < -2.57 {
+	case stat < -2.57:
 		return 0.10
-	} else if stat < -1.94 {
+	case stat < -1.94:
 		return 0.25
-	} else if stat < -1.62 {
+	case stat < -1.62:
 		return 0.50
+	default:
+		// Linear interpolation towards 1
+		return math.Min(0.5+(stat+1.62)*0.25, 0.99)
 	}
-	// Linear interpolation towards 1
-	return math.Min(0.5+(stat+1.62)*0.25, 0.99)
 }
 
 // kpssPValue approximates p-value for KPSS test.
@@ -481,23 +483,27 @@ func kpssPValue(stat float64, regression string) float64 {
 
 	if regression == "ct" {
 		// Trend stationarity
-		if stat > 0.216 {
+		switch {
+		case stat > 0.216:
 			return 0.01
-		} else if stat > 0.146 {
+		case stat > 0.146:
 			return 0.05
-		} else if stat > 0.119 {
+		case stat > 0.119:
 			return 0.10
+		default:
+			return 0.10 + (0.119-stat)*2
 		}
-		return 0.10 + (0.119-stat)*2
 	}
 
 	// Level stationarity
-	if stat > 0.739 {
+	switch {
+	case stat > 0.739:
 		return 0.01
-	} else if stat > 0.463 {
+	case stat > 0.463:
 		return 0.05
-	} else if stat > 0.347 {
+	case stat > 0.347:
 		return 0.10
+	default:
+		return 0.10 + (0.347-stat)*0.5
 	}
-	return 0.10 + (0.347-stat)*0.5
 }

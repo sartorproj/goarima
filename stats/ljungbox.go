@@ -18,7 +18,7 @@ type LjungBoxResult struct {
 // The null hypothesis is that there is no autocorrelation up to lag h.
 // If p-value < 0.05, we reject the null and conclude there is significant autocorrelation.
 // fitdf is the number of parameters estimated in the model (p + q for ARIMA).
-func LjungBox(series *timeseries.Series, lags int, fitdf int) *LjungBoxResult {
+func LjungBox(series *timeseries.Series, lags, fitdf int) *LjungBoxResult {
 	n := series.Len()
 	if n < 10 || lags < 1 {
 		return nil
@@ -68,7 +68,7 @@ type BoxPierceResult struct {
 
 // BoxPierce performs the Box-Pierce test for autocorrelation.
 // Similar to Ljung-Box but with a simpler formula.
-func BoxPierce(series *timeseries.Series, lags int, fitdf int) *BoxPierceResult {
+func BoxPierce(series *timeseries.Series, lags, fitdf int) *BoxPierceResult {
 	n := series.Len()
 	if n < 10 || lags < 1 {
 		return nil
@@ -121,7 +121,7 @@ func gamma(z float64) float64 {
 		return math.Pi / (math.Sin(math.Pi*z) * gamma(1-z))
 	}
 
-	z -= 1
+	z--
 	g := 7
 	c := []float64{
 		0.99999999999980993,

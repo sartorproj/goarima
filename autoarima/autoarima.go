@@ -144,7 +144,7 @@ func determineDifferencing(series *timeseries.Series, maxD int, testType string)
 }
 
 // determineSeasonalDifferencing determines optimal seasonal differencing.
-func determineSeasonalDifferencing(series *timeseries.Series, maxSD int, period int) int {
+func determineSeasonalDifferencing(series *timeseries.Series, _, period int) int { //nolint:unparam // maxSD reserved for future use
 	// Check seasonal autocorrelation
 	acf := stats.ACF(series, period*2)
 	if acf == nil {

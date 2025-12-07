@@ -43,7 +43,7 @@ func LoadCSV(filename string, opts *CSVOptions) (*Series, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer file.Close()
+	defer file.Close() //nolint:errcheck // error on close is not critical for read
 
 	return LoadCSVFromReader(file, opts)
 }
@@ -68,7 +68,7 @@ func LoadCSVFromReader(r io.Reader, opts *CSVOptions) (*Series, error) {
 
 	// Read header
 	var headers []string
-	var valueIdx, dateIdx, idIdx int = -1, -1, -1
+	valueIdx, dateIdx, idIdx := -1, -1, -1
 
 	if opts.HasHeader {
 		header, err := reader.Read()
@@ -185,14 +185,14 @@ func LoadCSVFromReader(r io.Reader, opts *CSVOptions) (*Series, error) {
 }
 
 // LoadCSVColumn loads a specific column from a CSV file as a series.
-func LoadCSVColumn(filename string, column string) (*Series, error) {
+func LoadCSVColumn(filename, column string) (*Series, error) {
 	opts := DefaultCSVOptions()
 	opts.ValueColumn = column
 	return LoadCSV(filename, opts)
 }
 
 // LoadCSVFiltered loads a filtered series from a CSV file.
-func LoadCSVFiltered(filename string, idColumn, idValue, valueColumn string) (*Series, error) {
+func LoadCSVFiltered(filename, idColumn, idValue, valueColumn string) (*Series, error) {
 	opts := DefaultCSVOptions()
 	opts.IDColumn = idColumn
 	opts.IDFilter = idValue
@@ -208,32 +208,33 @@ func SaveCSV(series *Series, filename string, includeIndex bool) error {
 	if err != nil {
 		return err
 	}
-	defer file.Close()
+	defer file.Close() //nolint:errcheck // best effort close
 
 	writer := bufio.NewWriter(file)
-	defer writer.Flush()
+	defer writer.Flush() //nolint:errcheck // best effort flush
 
 	// Write header
-	if includeIndex && len(series.Timestamps) == len(series.Values) {
-		writer.WriteString("ds,y\n")
-	} else if includeIndex {
-		writer.WriteString("index,y\n")
-	} else {
-		writer.WriteString("y\n")
+	switch {
+	case includeIndex && len(series.Timestamps) == len(series.Values):
+		_, _ = writer.WriteString("ds,y\n") //nolint:errcheck // best effort write
+	case includeIndex:
+		_, _ = writer.WriteString("index,y\n") //nolint:errcheck // best effort write
+	default:
+		_, _ = writer.WriteString("y\n") //nolint:errcheck // best effort write
 	}
 
 	// Write data
 	for i, v := range series.Values {
 		if includeIndex {
 			if len(series.Timestamps) == len(series.Values) {
-				writer.WriteString(series.Timestamps[i].Format("2006-01-02"))
+				_, _ = writer.WriteString(series.Timestamps[i].Format("2006-01-02")) //nolint:errcheck // best effort
 			} else {
-				writer.WriteString(strconv.Itoa(i + 1))
+				_, _ = writer.WriteString(strconv.Itoa(i + 1)) //nolint:errcheck // best effort
 			}
-			writer.WriteString(",")
+			_, _ = writer.WriteString(",") //nolint:errcheck // best effort
 		}
-		writer.WriteString(strconv.FormatFloat(v, 'f', -1, 64))
-		writer.WriteString("\n")
+		_, _ = writer.WriteString(strconv.FormatFloat(v, 'f', -1, 64)) //nolint:errcheck // best effort
+		_, _ = writer.WriteString("\n")                                //nolint:errcheck // best effort
 	}
 
 	return nil

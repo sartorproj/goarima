@@ -80,13 +80,13 @@ func (s *Series) Min() float64 {
 	if len(s.Values) == 0 {
 		return math.NaN()
 	}
-	min := s.Values[0]
+	minVal := s.Values[0]
 	for _, v := range s.Values[1:] {
-		if v < min {
-			min = v
+		if v < minVal {
+			minVal = v
 		}
 	}
-	return min
+	return minVal
 }
 
 // Max returns the maximum value in the series.
@@ -94,13 +94,13 @@ func (s *Series) Max() float64 {
 	if len(s.Values) == 0 {
 		return math.NaN()
 	}
-	max := s.Values[0]
+	maxVal := s.Values[0]
 	for _, v := range s.Values[1:] {
-		if v > max {
-			max = v
+		if v > maxVal {
+			maxVal = v
 		}
 	}
-	return max
+	return maxVal
 }
 
 // Median returns the median value of the series.

@@ -54,7 +54,7 @@ func TestARIMAFitAR1(t *testing.T) {
 
 	// Check that residuals exist
 	residuals := model.Residuals()
-	if residuals == nil || len(residuals) == 0 {
+	if len(residuals) == 0 {
 		t.Error("Residuals should not be empty")
 	}
 }

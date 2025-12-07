@@ -273,7 +273,6 @@ func (m *Model) calculateIC() {
 		m.LogLik = math.Inf(-1)
 	}
 
-	// AIC = -2*loglik + 2*k
 	m.AIC = -2*m.LogLik + 2*float64(k)
 
 	// AICc = AIC + 2*k*(k+1)/(n-k-1) - corrected AIC for small sample sizes
@@ -285,7 +284,6 @@ func (m *Model) calculateIC() {
 		m.AICc = math.Inf(1)
 	}
 
-	// BIC = -2*loglik + k*log(n)
 	m.BIC = -2*m.LogLik + float64(k)*math.Log(float64(n))
 }
 
@@ -358,9 +356,9 @@ func (m *Model) integrate(forecasts []float64) []float64 {
 		lastVal := original[len(original)-1-i]
 		for j := 0; j < len(result); j++ {
 			if j == 0 {
-				result[j] = result[j] + lastVal
+				result[j] += lastVal
 			} else {
-				result[j] = result[j] + result[j-1]
+				result[j] += result[j-1]
 			}
 		}
 	}
@@ -460,7 +458,7 @@ func yuleWalker(acf []float64, order int) []float64 {
 
 	// Levinson-Durbin recursion
 	phi[0] = acf[1]
-	var v float64 = 1 - phi[0]*phi[0]
+	v := 1 - phi[0]*phi[0]
 
 	for i := 1; i < order; i++ {
 		lambda := acf[i+1]

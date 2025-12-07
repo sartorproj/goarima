@@ -192,7 +192,7 @@ type STLResult struct {
 
 // STL performs Seasonal and Trend decomposition using Loess.
 // This is a simplified implementation of the STL algorithm.
-func STL(series *timeseries.Series, period int, robustIters int) *STLResult {
+func STL(series *timeseries.Series, period, robustIters int) *STLResult {
 	n := series.Len()
 	if n < 2*period {
 		return nil

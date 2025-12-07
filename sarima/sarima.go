@@ -492,22 +492,12 @@ func (m *Model) integrate(forecasts []float64) []float64 {
 	for i := 0; i < d; i++ {
 		lastVal := original[n-1]
 		// For multiple diffs, we need the last value at each integration level
-		if i > 0 {
-			// After first integration, use the running sum
-			for j := 0; j < len(result); j++ {
-				if j == 0 {
-					result[j] += lastVal
-				} else {
-					result[j] += result[j-1]
-				}
-			}
-		} else {
-			for j := 0; j < len(result); j++ {
-				if j == 0 {
-					result[j] += lastVal
-				} else {
-					result[j] += result[j-1]
-				}
+		// Both cases use the same logic: cumsum starting from lastVal
+		for j := 0; j < len(result); j++ {
+			if j == 0 {
+				result[j] += lastVal
+			} else {
+				result[j] += result[j-1]
 			}
 		}
 	}
@@ -587,12 +577,12 @@ func initARCoeffs(acf []float64, order int) []float64 {
 	return coeffs
 }
 
-func clamp(v, min, max float64) float64 {
-	if v < min {
-		return min
+func clamp(v, lower, upper float64) float64 { //nolint:unparam // lower is always -0.99 currently but may vary
+	if v < lower {
+		return lower
 	}
-	if v > max {
-		return max
+	if v > upper {
+		return upper
 	}
 	return v
 }
