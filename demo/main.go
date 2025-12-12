@@ -33,15 +33,17 @@ type Dataset struct {
 
 // ForecastResult holds model results for JSON export
 type ForecastResult struct {
-	ModelName string    `json:"model_name"`
-	Order     string    `json:"order"`
-	AIC       float64   `json:"aic"`
-	AICc      float64   `json:"aicc"`
-	BIC       float64   `json:"bic"`
-	RMSE      float64   `json:"rmse"`
-	MAE       float64   `json:"mae"`
-	MAPE      float64   `json:"mape"`
-	Forecasts []float64 `json:"forecasts"`
+	ModelName       string    `json:"model_name"`
+	Order           string    `json:"order"`
+	AIC             float64   `json:"aic"`
+	AICc            float64   `json:"aicc"`
+	BIC             float64   `json:"bic"`
+	RMSE            float64   `json:"rmse"`
+	MAE             float64   `json:"mae"`
+	MAPE            float64   `json:"mape"`
+	Forecasts       []float64 `json:"forecasts"`
+	ModelsEvaluated int       `json:"models_evaluated,omitempty"`
+	SuggestedOrder  string    `json:"suggested_order,omitempty"` // ACF/PACF suggested order
 }
 
 // DatasetResult holds analysis results for a dataset
@@ -248,17 +250,20 @@ func fitNonSeasonalModels(result *DatasetResult, train, test *timeseries.Series,
 		}
 	}
 
-	// Auto-ARIMA
+	// Auto-ARIMA with AICc criterion
 	cfg := autoarima.DefaultConfig()
 	cfg.MaxP, cfg.MaxQ, cfg.Criterion = 3, 3, "aicc"
 	if auto, err := autoarima.AutoARIMA(train, cfg); err == nil && auto.Model != nil {
 		forecasts, _ := auto.Predict(testSize)
 		rmse, mae, mape := metrics(test.Values, forecasts)
 		order := fmt.Sprintf("(%d,%d,%d)", auto.P, auto.D, auto.Q)
-		fmt.Printf("   Auto-ARIMA%s: RMSE=%.4f (%d models)\n", order, rmse, auto.ModelsEvaluated)
+		suggestedOrder := fmt.Sprintf("(%d,%d,%d)", auto.SuggestedP, auto.D, auto.SuggestedQ)
+		fmt.Printf("   Auto-ARIMA%s: RMSE=%.4f (%d models, ACF/PACF suggested: %s)\n",
+			order, rmse, auto.ModelsEvaluated, suggestedOrder)
 		result.Models = append(result.Models, ForecastResult{
-			ModelName: "Auto-ARIMA", Order: order, AIC: auto.AIC, AICc: auto.Criterion,
+			ModelName: "Auto-ARIMA", Order: order, AIC: auto.AIC, AICc: auto.AICc,
 			BIC: auto.BIC, RMSE: rmse, MAE: mae, MAPE: mape, Forecasts: forecasts,
+			ModelsEvaluated: auto.ModelsEvaluated, SuggestedOrder: suggestedOrder,
 		})
 	}
 }
@@ -288,7 +293,7 @@ func fitSeasonalModels(result *DatasetResult, train, test *timeseries.Series, pe
 		}
 	}
 
-	// Auto-SARIMA
+	// Auto-SARIMA with AICc criterion
 	cfg := autoarima.DefaultConfig()
 	cfg.Seasonal, cfg.SeasonalM = true, period
 	cfg.MaxP, cfg.MaxQ, cfg.MaxSP, cfg.MaxSQ = 2, 2, 2, 2
@@ -297,10 +302,14 @@ func fitSeasonalModels(result *DatasetResult, train, test *timeseries.Series, pe
 		forecasts, _ := auto.Predict(testSize)
 		rmse, mae, mape := metrics(test.Values, forecasts)
 		order := fmt.Sprintf("(%d,%d,%d)(%d,%d,%d)[%d]", auto.P, auto.D, auto.Q, auto.SP, auto.SD, auto.SQ, auto.M)
-		fmt.Printf("   Auto-SARIMA%s: RMSE=%.4f (%d models)\n", order, rmse, auto.ModelsEvaluated)
+		suggestedOrder := fmt.Sprintf("(%d,%d,%d)(%d,%d,%d)[%d]",
+			auto.SuggestedP, auto.D, auto.SuggestedQ, auto.SuggestedSP, auto.SD, auto.SuggestedSQ, auto.M)
+		fmt.Printf("   Auto-SARIMA%s: RMSE=%.4f (%d models, ACF/PACF suggested: %s)\n",
+			order, rmse, auto.ModelsEvaluated, suggestedOrder)
 		result.Models = append(result.Models, ForecastResult{
-			ModelName: "Auto-SARIMA", Order: order, AIC: auto.AIC, AICc: auto.Criterion,
+			ModelName: "Auto-SARIMA", Order: order, AIC: auto.AIC, AICc: auto.AICc,
 			BIC: auto.BIC, RMSE: rmse, MAE: mae, MAPE: mape, Forecasts: forecasts,
+			ModelsEvaluated: auto.ModelsEvaluated, SuggestedOrder: suggestedOrder,
 		})
 	}
 }

@@ -39,6 +39,12 @@ type Model struct {
 	diffData   *timeseries.Series
 	residuals  []float64
 	fittedVals []float64
+
+	// Standard errors for coefficients
+	ARStdErrors  []float64
+	MAStdErrors  []float64
+	SARStdErrors []float64
+	SMAStdErrors []float64
 }
 
 // New creates a new SARIMA model with the specified order.
@@ -152,7 +158,7 @@ func (m *Model) fitCSS() error {
 	return nil
 }
 
-// optimizeCSS optimizes SARIMA parameters.
+// optimizeCSS optimizes SARIMA parameters with adaptive learning and momentum.
 func (m *Model) optimizeCSS(y []float64) error {
 	n := len(y)
 	p := m.Order.P
@@ -161,9 +167,17 @@ func (m *Model) optimizeCSS(y []float64) error {
 	sq := m.Order.SQ
 	period := m.Order.M
 
-	maxIter := 100
-	tolerance := 1e-6
+	maxIter := 200
+	tolerance := 1e-8
 	learningRate := 0.005
+	momentum := 0.9
+	decay := 0.99
+
+	// Momentum terms
+	arMomentum := make([]float64, p)
+	maMomentum := make([]float64, q)
+	sarMomentum := make([]float64, sp)
+	smaMomentum := make([]float64, sq)
 
 	// Start index to avoid boundary issues
 	startIdx := max(max(p, q), max(sp*period, sq*period))
@@ -171,10 +185,18 @@ func (m *Model) optimizeCSS(y []float64) error {
 		startIdx = 0
 	}
 
+	// Track best solution
+	bestSSE := math.Inf(1)
+	bestARCoeffs := make([]float64, p)
+	bestMACoeffs := make([]float64, q)
+	bestSARCoeffs := make([]float64, sp)
+	bestSMACoeffs := make([]float64, sq)
+	noImproveCount := 0
+
 	for iter := 0; iter < maxIter; iter++ {
 		// Calculate residuals with current parameters
 		residuals := make([]float64, n)
-		prevSSE := 0.0
+		currentSSE := 0.0
 
 		for t := startIdx; t < n; t++ {
 			pred := m.Intercept
@@ -206,7 +228,24 @@ func (m *Model) optimizeCSS(y []float64) error {
 			}
 
 			residuals[t] = y[t] - pred
-			prevSSE += residuals[t] * residuals[t]
+			currentSSE += residuals[t] * residuals[t]
+		}
+
+		// Track best solution
+		if currentSSE < bestSSE {
+			bestSSE = currentSSE
+			copy(bestARCoeffs, m.ARCoeffs)
+			copy(bestMACoeffs, m.MACoeffs)
+			copy(bestSARCoeffs, m.SARCoeffs)
+			copy(bestSMACoeffs, m.SMACoeffs)
+			noImproveCount = 0
+		} else {
+			noImproveCount++
+		}
+
+		// Early stopping
+		if noImproveCount > 20 {
+			break
 		}
 
 		// Calculate gradients
@@ -243,54 +282,42 @@ func (m *Model) optimizeCSS(y []float64) error {
 			}
 		}
 
-		// Update parameters with constraints
+		// Update parameters with momentum
 		for i := 0; i < p; i++ {
-			m.ARCoeffs[i] -= learningRate * arGrad[i] / float64(n)
+			arMomentum[i] = momentum*arMomentum[i] + learningRate*arGrad[i]/float64(n)
+			m.ARCoeffs[i] -= arMomentum[i]
 			m.ARCoeffs[i] = clamp(m.ARCoeffs[i], -0.99, 0.99)
 		}
 		for i := 0; i < sp; i++ {
-			m.SARCoeffs[i] -= learningRate * sarGrad[i] / float64(n)
+			sarMomentum[i] = momentum*sarMomentum[i] + learningRate*sarGrad[i]/float64(n)
+			m.SARCoeffs[i] -= sarMomentum[i]
 			m.SARCoeffs[i] = clamp(m.SARCoeffs[i], -0.99, 0.99)
 		}
 		for i := 0; i < q; i++ {
-			m.MACoeffs[i] -= learningRate * maGrad[i] / float64(n)
+			maMomentum[i] = momentum*maMomentum[i] + learningRate*maGrad[i]/float64(n)
+			m.MACoeffs[i] -= maMomentum[i]
 			m.MACoeffs[i] = clamp(m.MACoeffs[i], -0.99, 0.99)
 		}
 		for i := 0; i < sq; i++ {
-			m.SMACoeffs[i] -= learningRate * smaGrad[i] / float64(n)
+			smaMomentum[i] = momentum*smaMomentum[i] + learningRate*smaGrad[i]/float64(n)
+			m.SMACoeffs[i] -= smaMomentum[i]
 			m.SMACoeffs[i] = clamp(m.SMACoeffs[i], -0.99, 0.99)
 		}
 
-		// Check convergence
-		newSSE := 0.0
-		for t := startIdx; t < n; t++ {
-			pred := m.Intercept
-			for i := 0; i < p && t-i-1 >= 0; i++ {
-				pred += m.ARCoeffs[i] * (y[t-i-1] - m.Intercept)
-			}
-			for i := 0; i < sp; i++ {
-				lag := (i + 1) * period
-				if t-lag >= 0 {
-					pred += m.SARCoeffs[i] * (y[t-lag] - m.Intercept)
-				}
-			}
-			for i := 0; i < q && t-i-1 >= 0; i++ {
-				pred += m.MACoeffs[i] * residuals[t-i-1]
-			}
-			for i := 0; i < sq; i++ {
-				lag := (i + 1) * period
-				if t-lag >= 0 {
-					pred += m.SMACoeffs[i] * residuals[t-lag]
-				}
-			}
-			diff := y[t] - pred
-			newSSE += diff * diff
-		}
+		// Decay learning rate
+		learningRate *= decay
 
-		if math.Abs(prevSSE-newSSE) < tolerance {
+		// Convergence check
+		if iter > 0 && math.Abs(currentSSE-bestSSE) < tolerance {
 			break
 		}
 	}
+
+	// Restore best solution
+	copy(m.ARCoeffs, bestARCoeffs)
+	copy(m.MACoeffs, bestMACoeffs)
+	copy(m.SARCoeffs, bestSARCoeffs)
+	copy(m.SMACoeffs, bestSMACoeffs)
 
 	// Calculate final residuals and fitted values
 	m.residuals = make([]float64, n)
@@ -372,18 +399,31 @@ func (m *Model) calculateIC() {
 
 // Predict generates forecasts for the specified number of steps ahead.
 func (m *Model) Predict(steps int) ([]float64, error) {
+	forecasts, _, _, err := m.PredictWithInterval(steps, 0.95)
+	return forecasts, err
+}
+
+// PredictWithInterval generates forecasts with prediction intervals.
+// Returns point forecasts, lower bounds, and upper bounds at the given confidence level.
+func (m *Model) PredictWithInterval(steps int, confidence float64) (forecasts, lower, upper []float64, err error) {
 	if !m.fitted {
-		return nil, errors.New("model must be fitted before prediction")
+		return nil, nil, nil, errors.New("model must be fitted before prediction")
 	}
 
 	if steps < 1 {
-		return nil, errors.New("steps must be at least 1")
+		return nil, nil, nil, errors.New("steps must be at least 1")
+	}
+
+	if confidence <= 0 || confidence >= 1 {
+		confidence = 0.95
 	}
 
 	p := m.Order.P
 	q := m.Order.Q
 	sp := m.Order.SP
 	sq := m.Order.SQ
+	d := m.Order.D
+	sd := m.Order.SD
 	period := m.Order.M
 
 	y := m.diffData.Values
@@ -431,12 +471,55 @@ func (m *Model) Predict(steps int) ([]float64, error) {
 		extResiduals[t] = 0
 	}
 
-	forecasts := extY[n:]
+	forecasts = make([]float64, steps)
+	copy(forecasts, extY[n:])
 
 	// Integrate back
 	forecasts = m.integrate(forecasts)
 
-	return forecasts, nil
+	// Calculate prediction intervals
+	// Approximate: variance grows with horizon for integrated series
+	z := normalQuantile((1 + confidence) / 2)
+
+	lower = make([]float64, steps)
+	upper = make([]float64, steps)
+
+	for h := 0; h < steps; h++ {
+		// Base standard error from residual variance
+		se := math.Sqrt(m.Variance)
+
+		// Variance grows with horizon for integrated/seasonal-integrated series
+		growthFactor := 1.0
+		if d > 0 {
+			growthFactor *= math.Sqrt(float64(h + 1))
+		}
+		if sd > 0 && period > 0 {
+			seasonalCycles := float64(h/period + 1)
+			growthFactor *= math.Sqrt(seasonalCycles)
+		}
+
+		se *= growthFactor
+		lower[h] = forecasts[h] - z*se
+		upper[h] = forecasts[h] + z*se
+	}
+
+	return forecasts, lower, upper, nil
+}
+
+// normalQuantile returns the z-value for a given probability.
+func normalQuantile(p float64) float64 {
+	if p <= 0 || p >= 1 {
+		return 0
+	}
+	if p < 0.5 {
+		return -normalQuantile(1 - p)
+	}
+
+	t := math.Sqrt(-2 * math.Log(1-p))
+	c0, c1, c2 := 2.515517, 0.802853, 0.010328
+	d1, d2, d3 := 1.432788, 0.189269, 0.001308
+
+	return t - (c0+c1*t+c2*t*t)/(1+d1*t+d2*t*t+d3*t*t*t)
 }
 
 // integrate undoes differencing to return forecasts on original scale.
@@ -527,19 +610,23 @@ func (m *Model) FittedValues() []float64 {
 
 // Summary represents a model summary.
 type Summary struct {
-	Order     Order
-	ARCoeffs  []float64
-	MACoeffs  []float64
-	SARCoeffs []float64
-	SMACoeffs []float64
-	Intercept float64
-	Variance  float64
-	AIC       float64
-	AICc      float64 // Corrected AIC
-	BIC       float64
-	LogLik    float64
-	NObs      int
-	LjungBox  *stats.LjungBoxResult
+	Order        Order
+	ARCoeffs     []float64
+	MACoeffs     []float64
+	SARCoeffs    []float64
+	SMACoeffs    []float64
+	ARStdErrors  []float64 // Standard errors for AR coefficients
+	MAStdErrors  []float64 // Standard errors for MA coefficients
+	SARStdErrors []float64 // Standard errors for seasonal AR coefficients
+	SMAStdErrors []float64 // Standard errors for seasonal MA coefficients
+	Intercept    float64
+	Variance     float64
+	AIC          float64
+	AICc         float64 // Corrected AIC
+	BIC          float64
+	LogLik       float64
+	NObs         int
+	LjungBox     *stats.LjungBoxResult
 }
 
 // Summary returns a summary of the fitted model.
@@ -552,19 +639,23 @@ func (m *Model) Summary() *Summary {
 	lb := stats.LjungBox(residSeries, 10, m.Order.P+m.Order.Q+m.Order.SP+m.Order.SQ)
 
 	return &Summary{
-		Order:     m.Order,
-		ARCoeffs:  m.ARCoeffs,
-		MACoeffs:  m.MACoeffs,
-		SARCoeffs: m.SARCoeffs,
-		SMACoeffs: m.SMACoeffs,
-		Intercept: m.Intercept,
-		Variance:  m.Variance,
-		AIC:       m.AIC,
-		AICc:      m.AICc,
-		BIC:       m.BIC,
-		LogLik:    m.LogLik,
-		NObs:      len(m.data.Values),
-		LjungBox:  lb,
+		Order:        m.Order,
+		ARCoeffs:     m.ARCoeffs,
+		MACoeffs:     m.MACoeffs,
+		SARCoeffs:    m.SARCoeffs,
+		SMACoeffs:    m.SMACoeffs,
+		ARStdErrors:  m.ARStdErrors,
+		MAStdErrors:  m.MAStdErrors,
+		SARStdErrors: m.SARStdErrors,
+		SMAStdErrors: m.SMAStdErrors,
+		Intercept:    m.Intercept,
+		Variance:     m.Variance,
+		AIC:          m.AIC,
+		AICc:         m.AICc,
+		BIC:          m.BIC,
+		LogLik:       m.LogLik,
+		NObs:         len(m.data.Values),
+		LjungBox:     lb,
 	}
 }
 

@@ -21,7 +21,7 @@ type Config struct {
 	Seasonal    bool   // Whether to consider seasonal models
 	SeasonalM   int    // Seasonal period (required if Seasonal=true)
 	Stepwise    bool   // Use stepwise search instead of exhaustive
-	Criterion   string // Information criterion: "aic" or "bic" (default: "aic")
+	Criterion   string // Information criterion: "aic", "aicc", or "bic" (default: "aic")
 	Trace       bool   // Print progress
 	StationTest string // Stationarity test: "adf" or "kpss" (default: "kpss")
 }
@@ -60,6 +60,7 @@ type Result struct {
 
 	// Model metrics
 	AIC       float64
+	AICc      float64 // Corrected AIC for small sample sizes
 	BIC       float64
 	LogLik    float64
 	Criterion float64
@@ -67,6 +68,12 @@ type Result struct {
 	// Search information
 	ModelsEvaluated int
 	IsSeasonal      bool
+
+	// ACF/PACF suggested orders (for diagnostics)
+	SuggestedP  int
+	SuggestedQ  int
+	SuggestedSP int
+	SuggestedSQ int
 }
 
 // AutoARIMA automatically selects the best ARIMA or SARIMA model.
@@ -159,6 +166,123 @@ func determineSeasonalDifferencing(series *timeseries.Series, _, period int) int
 	return 0
 }
 
+// suggestOrdersFromACF uses ACF/PACF analysis to suggest initial (p, q) orders.
+// This follows the Box-Jenkins methodology:
+// - If PACF cuts off after lag p and ACF tails off → AR(p) model
+// - If ACF cuts off after lag q and PACF tails off → MA(q) model
+// - If both tail off → ARMA model
+func suggestOrdersFromACF(series *timeseries.Series, maxP, maxQ int) (int, int) {
+	n := series.Len()
+	confBound := 1.96 / math.Sqrt(float64(n))
+
+	// Calculate ACF and PACF
+	maxLag := max(maxP, maxQ)
+	if maxLag > n/4 {
+		maxLag = n / 4
+	}
+	if maxLag < 1 {
+		return 0, 0
+	}
+
+	pacf := stats.PACF(series, maxLag)
+	acf := stats.ACF(series, maxLag)
+
+	if pacf == nil || acf == nil {
+		return 0, 0
+	}
+
+	// Find significant lags in PACF (suggests AR order p)
+	// Look for where PACF "cuts off" - last significant lag
+	suggestedP := 0
+	for i := 1; i < len(pacf) && i <= maxP; i++ {
+		if math.Abs(pacf[i]) > confBound {
+			suggestedP = i
+		}
+	}
+
+	// Find significant lags in ACF (suggests MA order q)
+	// Look for where ACF "cuts off" - last significant lag
+	suggestedQ := 0
+	for i := 1; i < len(acf) && i <= maxQ; i++ {
+		if math.Abs(acf[i]) > confBound {
+			suggestedQ = i
+		}
+	}
+
+	// Heuristic adjustments based on ACF/PACF patterns
+	// Count significant lags to detect "tailing off" vs "cutting off"
+	pacfSignificant := countSignificantLags(pacf, confBound, maxP)
+	acfSignificant := countSignificantLags(acf, confBound, maxQ)
+
+	// If PACF has many significant lags (tails off), reduce AR suggestion
+	// and increase MA suggestion
+	if pacfSignificant > 3 && suggestedP > 2 {
+		suggestedP = min(2, suggestedP)
+	}
+
+	// If ACF has many significant lags (tails off), reduce MA suggestion
+	// and AR model might be more appropriate
+	if acfSignificant > 3 && suggestedQ > 2 {
+		suggestedQ = min(2, suggestedQ)
+	}
+
+	return suggestedP, suggestedQ
+}
+
+// suggestSeasonalOrdersFromACF uses ACF/PACF to suggest seasonal orders (sp, sq).
+// Checks for significant correlations at seasonal lags: m, 2m, 3m, ...
+func suggestSeasonalOrdersFromACF(series *timeseries.Series, period, maxSP, maxSQ int) (int, int) {
+	n := series.Len()
+	confBound := 1.96 / math.Sqrt(float64(n))
+
+	// Need enough data for seasonal analysis
+	maxLag := period * max(maxSP, maxSQ)
+	if maxLag > n/2 {
+		maxLag = n / 2
+	}
+	if maxLag < period {
+		return 0, 0
+	}
+
+	pacf := stats.PACF(series, maxLag)
+	acf := stats.ACF(series, maxLag)
+
+	if pacf == nil || acf == nil {
+		return 0, 0
+	}
+
+	// Check seasonal lags in PACF (suggests seasonal AR order)
+	suggestedSP := 0
+	for k := 1; k <= maxSP; k++ {
+		lag := k * period
+		if lag < len(pacf) && math.Abs(pacf[lag]) > confBound {
+			suggestedSP = k
+		}
+	}
+
+	// Check seasonal lags in ACF (suggests seasonal MA order)
+	suggestedSQ := 0
+	for k := 1; k <= maxSQ; k++ {
+		lag := k * period
+		if lag < len(acf) && math.Abs(acf[lag]) > confBound {
+			suggestedSQ = k
+		}
+	}
+
+	return suggestedSP, suggestedSQ
+}
+
+// countSignificantLags counts how many lags have significant ACF/PACF values.
+func countSignificantLags(values []float64, confBound float64, maxLag int) int {
+	count := 0
+	for i := 1; i < len(values) && i <= maxLag; i++ {
+		if math.Abs(values[i]) > confBound {
+			count++
+		}
+	}
+	return count
+}
+
 // searchNonSeasonal performs ARIMA model search.
 func searchNonSeasonal(series *timeseries.Series, d int, config *Config) *Result {
 	bestResult := &Result{
@@ -217,16 +341,46 @@ func stepwiseSearchNonSeasonal(series *timeseries.Series, d int, config *Config)
 	}
 
 	getCriterion := func(model *arima.Model) float64 {
-		if config.Criterion == "bic" {
+		switch config.Criterion {
+		case "bic":
 			return model.BIC
+		case "aicc":
+			return model.AICc
+		default:
+			return model.AIC
 		}
-		return model.AIC
 	}
 
-	// Start with simple models
+	// Get data-driven suggestions from ACF/PACF analysis
+	// Apply differencing first to analyze the stationary series
+	diffSeries := series
+	for i := 0; i < d; i++ {
+		diffSeries = diffSeries.Diff()
+		if diffSeries.Len() < 10 {
+			break
+		}
+	}
+	suggestedP, suggestedQ := suggestOrdersFromACF(diffSeries, config.MaxP, config.MaxQ)
+
+	// Start with simple models plus ACF/PACF suggested model
 	startModels := []modelSpec{
 		{0, 0}, {1, 0}, {0, 1}, {1, 1}, {2, 2},
+		{2, 0}, {0, 2}, {2, 1}, {1, 2}, {3, 0}, {0, 3},
 	}
+
+	// Add ACF/PACF suggested models if they're different from defaults
+	if suggestedP > 0 || suggestedQ > 0 {
+		startModels = append(startModels,
+			modelSpec{suggestedP, suggestedQ},
+			modelSpec{suggestedP, 0},
+			modelSpec{0, suggestedQ},
+			modelSpec{suggestedP + 1, suggestedQ},
+			modelSpec{suggestedP, suggestedQ + 1},
+		)
+	}
+
+	// Track evaluated models to avoid duplicates
+	evaluated := make(map[modelSpec]bool)
 
 	bestSpec := modelSpec{0, 0}
 	bestCriterion := math.Inf(1)
@@ -235,9 +389,13 @@ func stepwiseSearchNonSeasonal(series *timeseries.Series, d int, config *Config)
 
 	// Evaluate starting models
 	for _, spec := range startModels {
-		if spec.p > config.MaxP || spec.q > config.MaxQ {
+		if spec.p < 0 || spec.p > config.MaxP || spec.q < 0 || spec.q > config.MaxQ {
 			continue
 		}
+		if evaluated[spec] {
+			continue
+		}
+		evaluated[spec] = true
 
 		model := arima.New(spec.p, d, spec.q)
 		err := model.Fit(series)
@@ -260,20 +418,28 @@ func stepwiseSearchNonSeasonal(series *timeseries.Series, d int, config *Config)
 	for improved {
 		improved = false
 
-		// Try neighboring models
+		// Try neighboring models - including diagonal combinations
 		neighbors := []modelSpec{
+			// Single dimension changes
 			{bestSpec.p + 1, bestSpec.q},
 			{bestSpec.p - 1, bestSpec.q},
 			{bestSpec.p, bestSpec.q + 1},
 			{bestSpec.p, bestSpec.q - 1},
+			// Diagonal combinations
 			{bestSpec.p + 1, bestSpec.q + 1},
 			{bestSpec.p - 1, bestSpec.q - 1},
+			{bestSpec.p + 1, bestSpec.q - 1},
+			{bestSpec.p - 1, bestSpec.q + 1},
 		}
 
 		for _, spec := range neighbors {
 			if spec.p < 0 || spec.p > config.MaxP || spec.q < 0 || spec.q > config.MaxQ {
 				continue
 			}
+			if evaluated[spec] {
+				continue
+			}
+			evaluated[spec] = true
 
 			model := arima.New(spec.p, d, spec.q)
 			err := model.Fit(series)
@@ -299,11 +465,14 @@ func stepwiseSearchNonSeasonal(series *timeseries.Series, d int, config *Config)
 		D:               d,
 		Q:               bestSpec.q,
 		AIC:             bestModel.AIC,
+		AICc:            bestModel.AICc,
 		BIC:             bestModel.BIC,
 		LogLik:          bestModel.LogLik,
 		Criterion:       bestCriterion,
 		ModelsEvaluated: modelsEvaluated,
 		IsSeasonal:      false,
+		SuggestedP:      suggestedP,
+		SuggestedQ:      suggestedQ,
 	}
 }
 
@@ -374,20 +543,71 @@ func stepwiseSearchSeasonal(series *timeseries.Series, d, sd int, config *Config
 	}
 
 	getCriterion := func(model *sarima.Model) float64 {
-		if config.Criterion == "bic" {
+		switch config.Criterion {
+		case "bic":
 			return model.BIC
+		case "aicc":
+			return model.AICc
+		default:
+			return model.AIC
 		}
-		return model.AIC
 	}
 
-	// Starting models
+	// Apply differencing to analyze the stationary series for ACF/PACF
+	diffSeries := series
+	for i := 0; i < d; i++ {
+		diffSeries = diffSeries.Diff()
+		if diffSeries.Len() < 10 {
+			break
+		}
+	}
+	// Apply seasonal differencing
+	for i := 0; i < sd && config.SeasonalM > 0; i++ {
+		diffSeries = diffSeries.SeasonalDiff(config.SeasonalM)
+		if diffSeries.Len() < 10 {
+			break
+		}
+	}
+
+	// Get data-driven suggestions from ACF/PACF analysis
+	suggestedP, suggestedQ := suggestOrdersFromACF(diffSeries, config.MaxP, config.MaxQ)
+	suggestedSP, suggestedSQ := suggestSeasonalOrdersFromACF(diffSeries, config.SeasonalM, config.MaxSP, config.MaxSQ)
+
+	// Starting models - expanded set to explore more combinations
 	startModels := []modelSpec{
 		{0, 0, 0, 0},
 		{1, 0, 1, 0},
 		{0, 1, 0, 1},
 		{1, 1, 1, 1},
 		{2, 2, 1, 1},
+		{2, 0, 1, 0},
+		{0, 2, 0, 1},
+		{1, 2, 1, 0},
+		{2, 1, 0, 1},
+		{1, 0, 0, 1},
+		{0, 1, 1, 0},
 	}
+
+	// Add ACF/PACF suggested models
+	if suggestedP > 0 || suggestedQ > 0 || suggestedSP > 0 || suggestedSQ > 0 {
+		startModels = append(startModels,
+			// Full suggested model
+			modelSpec{suggestedP, suggestedQ, suggestedSP, suggestedSQ},
+			// Non-seasonal only suggestions
+			modelSpec{suggestedP, suggestedQ, 0, 0},
+			modelSpec{suggestedP, 0, suggestedSP, 0},
+			modelSpec{0, suggestedQ, 0, suggestedSQ},
+			// Seasonal only suggestions
+			modelSpec{0, 0, suggestedSP, suggestedSQ},
+			modelSpec{1, 1, suggestedSP, suggestedSQ},
+			// Variations around suggested
+			modelSpec{suggestedP + 1, suggestedQ, suggestedSP, suggestedSQ},
+			modelSpec{suggestedP, suggestedQ + 1, suggestedSP, suggestedSQ},
+		)
+	}
+
+	// Track evaluated models to avoid duplicates
+	evaluated := make(map[modelSpec]bool)
 
 	bestSpec := modelSpec{0, 0, 0, 0}
 	bestCriterion := math.Inf(1)
@@ -395,10 +615,14 @@ func stepwiseSearchSeasonal(series *timeseries.Series, d, sd int, config *Config
 	modelsEvaluated := 0
 
 	for _, spec := range startModels {
-		if spec.p > config.MaxP || spec.q > config.MaxQ ||
-			spec.sp > config.MaxSP || spec.sq > config.MaxSQ {
+		if spec.p < 0 || spec.p > config.MaxP || spec.q < 0 || spec.q > config.MaxQ ||
+			spec.sp < 0 || spec.sp > config.MaxSP || spec.sq < 0 || spec.sq > config.MaxSQ {
 			continue
 		}
+		if evaluated[spec] {
+			continue
+		}
+		evaluated[spec] = true
 
 		model := sarima.New(spec.p, d, spec.q, spec.sp, sd, spec.sq, config.SeasonalM)
 		err := model.Fit(series)
@@ -422,6 +646,7 @@ func stepwiseSearchSeasonal(series *timeseries.Series, d, sd int, config *Config
 		improved = false
 
 		neighbors := []modelSpec{
+			// Single dimension changes
 			{bestSpec.p + 1, bestSpec.q, bestSpec.sp, bestSpec.sq},
 			{bestSpec.p - 1, bestSpec.q, bestSpec.sp, bestSpec.sq},
 			{bestSpec.p, bestSpec.q + 1, bestSpec.sp, bestSpec.sq},
@@ -430,6 +655,25 @@ func stepwiseSearchSeasonal(series *timeseries.Series, d, sd int, config *Config
 			{bestSpec.p, bestSpec.q, bestSpec.sp - 1, bestSpec.sq},
 			{bestSpec.p, bestSpec.q, bestSpec.sp, bestSpec.sq + 1},
 			{bestSpec.p, bestSpec.q, bestSpec.sp, bestSpec.sq - 1},
+			// Diagonal combinations for non-seasonal components
+			{bestSpec.p + 1, bestSpec.q + 1, bestSpec.sp, bestSpec.sq},
+			{bestSpec.p - 1, bestSpec.q - 1, bestSpec.sp, bestSpec.sq},
+			{bestSpec.p + 1, bestSpec.q - 1, bestSpec.sp, bestSpec.sq},
+			{bestSpec.p - 1, bestSpec.q + 1, bestSpec.sp, bestSpec.sq},
+			// Diagonal combinations for seasonal components
+			{bestSpec.p, bestSpec.q, bestSpec.sp + 1, bestSpec.sq + 1},
+			{bestSpec.p, bestSpec.q, bestSpec.sp - 1, bestSpec.sq - 1},
+			{bestSpec.p, bestSpec.q, bestSpec.sp + 1, bestSpec.sq - 1},
+			{bestSpec.p, bestSpec.q, bestSpec.sp - 1, bestSpec.sq + 1},
+			// Complete cross combinations (AR with seasonal AR, MA with seasonal MA)
+			{bestSpec.p + 1, bestSpec.q, bestSpec.sp + 1, bestSpec.sq},
+			{bestSpec.p + 1, bestSpec.q, bestSpec.sp - 1, bestSpec.sq},
+			{bestSpec.p - 1, bestSpec.q, bestSpec.sp + 1, bestSpec.sq},
+			{bestSpec.p - 1, bestSpec.q, bestSpec.sp - 1, bestSpec.sq},
+			{bestSpec.p, bestSpec.q + 1, bestSpec.sp, bestSpec.sq + 1},
+			{bestSpec.p, bestSpec.q + 1, bestSpec.sp, bestSpec.sq - 1},
+			{bestSpec.p, bestSpec.q - 1, bestSpec.sp, bestSpec.sq + 1},
+			{bestSpec.p, bestSpec.q - 1, bestSpec.sp, bestSpec.sq - 1},
 		}
 
 		for _, spec := range neighbors {
@@ -439,6 +683,10 @@ func stepwiseSearchSeasonal(series *timeseries.Series, d, sd int, config *Config
 				spec.sq < 0 || spec.sq > config.MaxSQ {
 				continue
 			}
+			if evaluated[spec] {
+				continue
+			}
+			evaluated[spec] = true
 
 			model := sarima.New(spec.p, d, spec.q, spec.sp, sd, spec.sq, config.SeasonalM)
 			err := model.Fit(series)
@@ -476,11 +724,16 @@ func stepwiseSearchSeasonal(series *timeseries.Series, d, sd int, config *Config
 		SQ:              bestSpec.sq,
 		M:               config.SeasonalM,
 		AIC:             bestModel.AIC,
+		AICc:            bestModel.AICc,
 		BIC:             bestModel.BIC,
 		LogLik:          bestModel.LogLik,
 		Criterion:       bestCriterion,
 		ModelsEvaluated: modelsEvaluated,
 		IsSeasonal:      true,
+		SuggestedP:      suggestedP,
+		SuggestedQ:      suggestedQ,
+		SuggestedSP:     suggestedSP,
+		SuggestedSQ:     suggestedSQ,
 	}
 }
 
