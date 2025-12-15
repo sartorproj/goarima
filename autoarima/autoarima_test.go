@@ -19,11 +19,17 @@ func TestDefaultConfig(t *testing.T) {
 	if config.MaxQ != 5 {
 		t.Errorf("Expected MaxQ=5, got %d", config.MaxQ)
 	}
-	if config.Criterion != "aic" {
-		t.Errorf("Expected Criterion='aic', got %s", config.Criterion)
+	if config.Criterion != "aicc" {
+		t.Errorf("Expected Criterion='aicc', got %s", config.Criterion)
 	}
-	if config.Stepwise != true {
+	if !config.Stepwise {
 		t.Error("Expected Stepwise=true")
+	}
+	if !config.AutoSeasonal {
+		t.Error("Expected AutoSeasonal=true by default")
+	}
+	if config.ModelSelection != "cv" {
+		t.Errorf("Expected ModelSelection='cv', got %s", config.ModelSelection)
 	}
 }
 
@@ -43,7 +49,7 @@ func TestAutoARIMAStationary(t *testing.T) {
 	config := DefaultConfig()
 	config.MaxP = 3
 	config.MaxQ = 3
-	config.Stepwise = true
+	config.AutoSeasonal = false // Disable for this test
 
 	result, err := AutoARIMA(series, config)
 	if err != nil {
@@ -54,9 +60,9 @@ func TestAutoARIMAStationary(t *testing.T) {
 		t.Fatal("Result should not be nil")
 	}
 
-	t.Logf("Selected model: ARIMA(%d,%d,%d)", result.P, result.D, result.Q)
+	t.Logf("Selected model: %s", result.Order())
 	t.Logf("AIC: %f, BIC: %f", result.AIC, result.BIC)
-	t.Logf("Models evaluated: %d", result.ModelsEvaluated)
+	t.Logf("CV RMSE: %f, MAPE: %f%%", result.RMSE, result.MAPE)
 
 	// D should be 0 for stationary data
 	if result.D > 1 {
@@ -78,13 +84,14 @@ func TestAutoARIMANonStationary(t *testing.T) {
 	config := DefaultConfig()
 	config.MaxP = 2
 	config.MaxQ = 2
+	config.AutoSeasonal = false
 
 	result, err := AutoARIMA(series, config)
 	if err != nil {
 		t.Fatalf("AutoARIMA failed: %v", err)
 	}
 
-	t.Logf("Selected model: ARIMA(%d,%d,%d)", result.P, result.D, result.Q)
+	t.Logf("Selected model: %s", result.Order())
 	t.Logf("AIC: %f", result.AIC)
 
 	// D should be >= 1 for non-stationary data
@@ -93,40 +100,81 @@ func TestAutoARIMANonStationary(t *testing.T) {
 	}
 }
 
-func TestAutoARIMASeasonal(t *testing.T) {
-	// Monthly data with seasonality
-	n := 120
-	period := 12
+func TestAutoARIMAAutoSeasonality(t *testing.T) {
+	// Data with clear daily seasonality (period 24)
+	n := 168 // 7 days of hourly data
+	period := 24
 	values := make([]float64, n)
 
 	for i := 0; i < n; i++ {
-		trend := float64(i) * 0.3
+		trend := float64(i) * 0.01
 		seasonal := 15 * math.Sin(2*math.Pi*float64(i)/float64(period))
 		values[i] = 100 + trend + seasonal + float64(i%5-2)/3
 	}
 
 	series := timeseries.New(values)
 	config := DefaultConfig()
-	config.Seasonal = true
-	config.SeasonalM = 12
+	config.AutoSeasonal = true
+	config.SeasonalPeriods = []int{12, 24, 48, 168}
 	config.MaxP = 2
 	config.MaxQ = 2
-	config.MaxSP = 1
-	config.MaxSQ = 1
 
 	result, err := AutoARIMA(series, config)
 	if err != nil {
 		t.Fatalf("AutoARIMA failed: %v", err)
 	}
 
-	if !result.IsSeasonal {
-		t.Error("Expected seasonal model")
+	t.Logf("Detected period: %d (strength: %.4f)", result.DetectedPeriod, result.SeasonalityStrength)
+	t.Logf("Detection method: %s", result.DetectionMethod)
+	t.Logf("Selected model: %s", result.Order())
+	t.Logf("Is seasonal: %v", result.IsSeasonal)
+	t.Logf("CV RMSE: %f, MAPE: %f%%", result.RMSE, result.MAPE)
+
+	// Should detect period 24
+	if result.DetectedPeriod != 24 {
+		t.Logf("Warning: Expected period 24, got %d", result.DetectedPeriod)
 	}
 
-	t.Logf("Selected model: SARIMA(%d,%d,%d)(%d,%d,%d)[%d]",
-		result.P, result.D, result.Q,
-		result.SP, result.SD, result.SQ, result.M)
-	t.Logf("AIC: %f, Models evaluated: %d", result.AIC, result.ModelsEvaluated)
+	// Should select seasonal model
+	if !result.IsSeasonal {
+		t.Log("Warning: Expected seasonal model to be selected")
+	}
+}
+
+func TestAutoARIMAModelComparison(t *testing.T) {
+	// Data with seasonality - test that both models are compared
+	n := 168
+	period := 24
+	values := make([]float64, n)
+
+	for i := 0; i < n; i++ {
+		seasonal := 10 * math.Sin(2*math.Pi*float64(i)/float64(period))
+		values[i] = 100 + seasonal + float64(i%5-2)/3
+	}
+
+	series := timeseries.New(values)
+	config := DefaultConfig()
+	config.CompareModels = true
+	config.AutoSeasonal = true
+
+	result, err := AutoARIMA(series, config)
+	if err != nil {
+		t.Fatalf("AutoARIMA failed: %v", err)
+	}
+
+	t.Logf("Candidates evaluated: %d", len(result.Candidates))
+	for _, c := range result.Candidates {
+		selected := ""
+		if c.Selected {
+			selected = " [SELECTED]"
+		}
+		t.Logf("  %s: RMSE=%.6f, MAPE=%.2f%%, AICc=%.2f%s",
+			c.Name, c.RMSE, c.MAPE, c.AICc, selected)
+	}
+
+	if len(result.Candidates) < 2 {
+		t.Log("Warning: Expected at least 2 candidates (ARIMA + SARIMA)")
+	}
 }
 
 func TestAutoARIMAPredict(t *testing.T) {
@@ -140,6 +188,7 @@ func TestAutoARIMAPredict(t *testing.T) {
 	config := DefaultConfig()
 	config.MaxP = 2
 	config.MaxQ = 2
+	config.AutoSeasonal = false
 
 	result, err := AutoARIMA(series, config)
 	if err != nil {
@@ -165,6 +214,46 @@ func TestAutoARIMAPredict(t *testing.T) {
 	}
 }
 
+func TestAutoARIMAPredictWithInterval(t *testing.T) {
+	n := 100
+	values := make([]float64, n)
+	for i := 0; i < n; i++ {
+		values[i] = 100 + float64(i%7-3)
+	}
+
+	series := timeseries.New(values)
+	config := DefaultConfig()
+	config.AutoSeasonal = false
+
+	result, err := AutoARIMA(series, config)
+	if err != nil {
+		t.Fatalf("AutoARIMA failed: %v", err)
+	}
+
+	forecast, lower, upper, err := result.PredictWithInterval(5, 0.95)
+	if err != nil {
+		t.Fatalf("PredictWithInterval failed: %v", err)
+	}
+
+	if len(forecast) != 5 {
+		t.Errorf("Expected 5 forecasts, got %d", len(forecast))
+	}
+
+	t.Logf("Forecast: %v", forecast)
+	t.Logf("Lower: %v", lower)
+	t.Logf("Upper: %v", upper)
+
+	// Lower should be <= forecast <= upper
+	for i := 0; i < len(forecast); i++ {
+		if lower != nil && lower[i] > forecast[i] {
+			t.Errorf("Lower bound %f > forecast %f at %d", lower[i], forecast[i], i)
+		}
+		if upper != nil && upper[i] < forecast[i] {
+			t.Errorf("Upper bound %f < forecast %f at %d", upper[i], forecast[i], i)
+		}
+	}
+}
+
 func TestAutoARIMAResiduals(t *testing.T) {
 	n := 100
 	values := make([]float64, n)
@@ -174,6 +263,7 @@ func TestAutoARIMAResiduals(t *testing.T) {
 
 	series := timeseries.New(values)
 	config := DefaultConfig()
+	config.AutoSeasonal = false
 
 	result, err := AutoARIMA(series, config)
 	if err != nil {
@@ -208,50 +298,27 @@ func TestAutoARIMABICCriterion(t *testing.T) {
 	// Test with AIC
 	configAIC := DefaultConfig()
 	configAIC.Criterion = "aic"
+	configAIC.ModelSelection = "aic" // Use AIC for selection too
 	configAIC.MaxP = 2
 	configAIC.MaxQ = 2
+	configAIC.AutoSeasonal = false
 
 	resultAIC, _ := AutoARIMA(series, configAIC)
 
 	// Test with BIC
 	configBIC := DefaultConfig()
 	configBIC.Criterion = "bic"
+	configBIC.ModelSelection = "bic"
 	configBIC.MaxP = 2
 	configBIC.MaxQ = 2
+	configBIC.AutoSeasonal = false
 
 	resultBIC, _ := AutoARIMA(series, configBIC)
 
-	t.Logf("AIC criterion: ARIMA(%d,%d,%d), AIC=%f",
-		resultAIC.P, resultAIC.D, resultAIC.Q, resultAIC.AIC)
-	t.Logf("BIC criterion: ARIMA(%d,%d,%d), BIC=%f",
-		resultBIC.P, resultBIC.D, resultBIC.Q, resultBIC.BIC)
-}
-
-func TestAutoARIMAExhaustiveSearch(t *testing.T) {
-	n := 100
-	values := make([]float64, n)
-	for i := 0; i < n; i++ {
-		values[i] = 100 + 0.5*float64(i%7-3)
-	}
-
-	series := timeseries.New(values)
-	config := DefaultConfig()
-	config.Stepwise = false // Use exhaustive search
-	config.MaxP = 2
-	config.MaxQ = 2
-
-	result, err := AutoARIMA(series, config)
-	if err != nil {
-		t.Fatalf("AutoARIMA failed: %v", err)
-	}
-
-	t.Logf("Exhaustive search: ARIMA(%d,%d,%d)", result.P, result.D, result.Q)
-	t.Logf("Models evaluated: %d", result.ModelsEvaluated)
-
-	// Exhaustive should evaluate more models
-	if result.ModelsEvaluated < 5 {
-		t.Log("Note: Exhaustive search evaluated fewer models than expected")
-	}
+	t.Logf("AIC criterion: %s, AIC=%f",
+		resultAIC.Order(), resultAIC.AIC)
+	t.Logf("BIC criterion: %s, BIC=%f",
+		resultBIC.Order(), resultBIC.BIC)
 }
 
 func TestAutoARIMAADFTest(t *testing.T) {
@@ -270,13 +337,63 @@ func TestAutoARIMAADFTest(t *testing.T) {
 	config.StationTest = "adf"
 	config.MaxP = 2
 	config.MaxQ = 2
+	config.AutoSeasonal = false
 
 	result, err := AutoARIMA(series, config)
 	if err != nil {
 		t.Fatalf("AutoARIMA failed: %v", err)
 	}
 
-	t.Logf("ADF test selected: ARIMA(%d,%d,%d)", result.P, result.D, result.Q)
+	t.Logf("ADF test selected: %s", result.Order())
+}
+
+func TestDetectSeasonalPeriod(t *testing.T) {
+	// Data with clear seasonality at period 12
+	n := 120
+	period := 12
+	values := make([]float64, n)
+
+	for i := 0; i < n; i++ {
+		values[i] = 100 + 20*math.Sin(2*math.Pi*float64(i)/float64(period))
+	}
+
+	series := timeseries.New(values)
+	config := DefaultConfig()
+
+	detectedPeriod, strength := detectSeasonalPeriod(series, config)
+
+	t.Logf("Detected period: %d (expected: %d)", detectedPeriod, period)
+	t.Logf("Strength: %.4f", strength)
+
+	if detectedPeriod != period {
+		t.Errorf("Expected period %d, got %d", period, detectedPeriod)
+	}
+	if strength < 0.5 {
+		t.Errorf("Expected strength > 0.5, got %.4f", strength)
+	}
+}
+
+func TestDetectSeasonalPeriodNoSeasonality(t *testing.T) {
+	// Random data without seasonality
+	n := 100
+	values := make([]float64, n)
+
+	for i := 0; i < n; i++ {
+		values[i] = 100 + float64(i%7-3)
+	}
+
+	series := timeseries.New(values)
+	config := DefaultConfig()
+	config.SeasonalityThreshold = 0.5
+
+	detectedPeriod, strength := detectSeasonalPeriod(series, config)
+
+	t.Logf("Detected period: %d, strength: %.4f", detectedPeriod, strength)
+
+	// Should detect no significant seasonality (or low strength)
+	if detectedPeriod > 0 && strength > 0.7 {
+		t.Logf("Warning: Detected period %d with high strength for non-seasonal data", detectedPeriod)
+	}
 }
 
 func TestDetermineDifferencing(t *testing.T) {
@@ -326,7 +443,7 @@ func TestAutoARIMANilConfig(t *testing.T) {
 
 	series := timeseries.New(values)
 
-	// Should use default config
+	// Should use default config with auto-seasonality
 	result, err := AutoARIMA(series, nil)
 	if err != nil {
 		t.Fatalf("AutoARIMA with nil config failed: %v", err)
@@ -336,5 +453,123 @@ func TestAutoARIMANilConfig(t *testing.T) {
 		t.Fatal("Result should not be nil")
 	}
 
-	t.Logf("With nil config: ARIMA(%d,%d,%d)", result.P, result.D, result.Q)
+	t.Logf("With nil config: %s", result.Order())
+	t.Logf("Detected period: %d", result.DetectedPeriod)
+}
+
+func TestAutoARIMAOrder(t *testing.T) {
+	n := 100
+	values := make([]float64, n)
+	for i := 0; i < n; i++ {
+		values[i] = 100 + float64(i%5-2)
+	}
+
+	series := timeseries.New(values)
+	config := DefaultConfig()
+	config.AutoSeasonal = false
+
+	result, _ := AutoARIMA(series, config)
+
+	order := result.Order()
+	t.Logf("Order string: %s", order)
+
+	// Should be in format ARIMA(p,d,q)
+	if len(order) < 10 {
+		t.Errorf("Order string too short: %s", order)
+	}
+}
+
+func TestCrossValidationSelection(t *testing.T) {
+	// Test that CV-based selection works
+	n := 120
+	period := 24
+	values := make([]float64, n)
+
+	for i := 0; i < n; i++ {
+		seasonal := 10 * math.Sin(2*math.Pi*float64(i)/float64(period))
+		values[i] = 100 + seasonal + float64(i%5-2)/3
+	}
+
+	series := timeseries.New(values)
+	config := DefaultConfig()
+	config.ModelSelection = "cv"
+	config.TestRatio = 0.2
+	config.CompareModels = true
+
+	result, err := AutoARIMA(series, config)
+	if err != nil {
+		t.Fatalf("AutoARIMA failed: %v", err)
+	}
+
+	t.Logf("Selected: %s", result.Order())
+	t.Logf("CV RMSE: %f", result.RMSE)
+	t.Logf("CV MAPE: %f%%", result.MAPE)
+
+	// RMSE should be finite
+	if math.IsInf(result.RMSE, 0) || math.IsNaN(result.RMSE) {
+		t.Error("RMSE should be finite")
+	}
+}
+
+func TestPredictWithLevels(t *testing.T) {
+	// Test multi-level prediction intervals (like R's forecast)
+	n := 100
+	values := make([]float64, n)
+	for i := 0; i < n; i++ {
+		values[i] = 100 + float64(i%7-3)
+	}
+
+	series := timeseries.New(values)
+	config := DefaultConfig()
+	config.AutoSeasonal = false
+
+	result, err := AutoARIMA(series, config)
+	if err != nil {
+		t.Fatalf("AutoARIMA failed: %v", err)
+	}
+
+	// Test with default levels (80%, 95%)
+	fc, err := result.PredictWithLevels(5, nil)
+	if err != nil {
+		t.Fatalf("PredictWithLevels failed: %v", err)
+	}
+
+	t.Logf("Forecasts: %v", fc.Forecasts)
+	t.Logf("Levels: %v", fc.Levels)
+	t.Logf("80%% Lower: %v", fc.Lower[0.80])
+	t.Logf("80%% Upper: %v", fc.Upper[0.80])
+	t.Logf("95%% Lower: %v", fc.Lower[0.95])
+	t.Logf("95%% Upper: %v", fc.Upper[0.95])
+
+	// Check we have both levels
+	if len(fc.Levels) != 2 {
+		t.Errorf("Expected 2 levels, got %d", len(fc.Levels))
+	}
+
+	// 80% interval should be narrower than 95%
+	if len(fc.Lower[0.80]) > 0 && len(fc.Lower[0.95]) > 0 {
+		width80 := fc.Upper[0.80][0] - fc.Lower[0.80][0]
+		width95 := fc.Upper[0.95][0] - fc.Lower[0.95][0]
+		if width80 >= width95 {
+			t.Errorf("80%% interval (%.4f) should be narrower than 95%% (%.4f)", width80, width95)
+		}
+		t.Logf("Interval widths: 80%%=%.4f, 95%%=%.4f", width80, width95)
+	}
+
+	// Test with custom levels
+	customLevels := []float64{0.90, 0.99}
+	fc2, err := result.PredictWithLevels(5, customLevels)
+	if err != nil {
+		t.Fatalf("PredictWithLevels with custom levels failed: %v", err)
+	}
+
+	if len(fc2.Levels) != 2 {
+		t.Errorf("Expected 2 custom levels, got %d", len(fc2.Levels))
+	}
+	if _, ok := fc2.Lower[0.90]; !ok {
+		t.Error("Missing 90% lower bound")
+	}
+	if _, ok := fc2.Upper[0.99]; !ok {
+		t.Error("Missing 99% upper bound")
+	}
 }

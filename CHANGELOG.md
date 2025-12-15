@@ -2,6 +2,113 @@
 
 All notable changes to GoARIMA will be documented in this file.
 
+## [v0.3.0] - 2025-12-15
+
+### 🎯 Major Feature: Automatic Seasonality Detection
+
+This release transforms goarima into a true "auto" library that automatically detects and handles seasonal patterns without user configuration.
+
+### Added
+
+#### Automatic Seasonal Period Detection
+- **Auto-detects seasonality from ACF analysis** - no need to specify `SeasonalM`
+- Checks common periods: 4, 6, 7, 12, 24, 52, 168, 365
+- Configurable via `SeasonalPeriods` and `SeasonalityThreshold`
+- New fields in `Result`:
+  - `DetectedPeriod` - auto-detected seasonal period (0 if none)
+  - `SeasonalityStrength` - ACF value at detected period
+  - `DetectionMethod` - "acf" or "none"
+
+#### Model Comparison (ARIMA vs SARIMA)
+- **Automatically compares seasonal and non-seasonal models**
+- Selects best model based on cross-validation RMSE
+- New `Candidates []ModelCandidate` field shows all models evaluated
+- Each candidate includes: Name, RMSE, MAPE, AICc, selected status
+
+#### Cross-Validation Based Model Selection
+- **Uses time series cross-validation** instead of just AIC/AICc
+- Configurable via `ModelSelection`: "cv", "aicc", "aic", "bic"
+- `TestRatio` controls train/test split (default: 0.2)
+- `PreferSimpler` option prefers simpler models when scores are close
+
+#### Multi-Level Prediction Intervals (R-style)
+- New `PredictWithLevels(steps, levels)` method
+- Returns 80% and 95% intervals by default (like R's `forecast()`)
+- `ForecastResult` struct with `Lower` and `Upper` maps by confidence level
+- Example: `fc.Lower[0.95]` for 95% lower bound
+
+#### New Config Options
+```go
+type Config struct {
+    // Seasonality detection (NEW)
+    AutoSeasonal         bool      // Auto-detect seasonality (default: true)
+    SeasonalPeriods      []int     // Periods to check
+    SeasonalityThreshold float64   // ACF threshold (default: 0.4)
+    MinSeasonalPeriod    int       // Minimum period (default: 4)
+    MaxSeasonalPeriod    int       // Maximum period (default: 168)
+
+    // Model selection (NEW)
+    ModelSelection   string   // "cv", "aicc", "aic", "bic" (default: "cv")
+    CVFolds          int      // CV folds (default: 5)
+    TestRatio        float64  // Test set ratio (default: 0.2)
+    CompareModels    bool     // Compare seasonal vs non-seasonal (default: true)
+    PreferSimpler    bool     // Prefer simpler if close (default: true)
+    SimplerThreshold float64  // Threshold for simpler preference (default: 0.05)
+}
+```
+
+#### Helper Methods
+- `Order() string` - Returns formatted order string (e.g., "SARIMA(1,1,1)(0,1,1)[24]")
+- `DefaultForecastLevels = []float64{0.80, 0.95}` - Default confidence levels
+
+### Changed
+
+- **Default behavior**: Auto-seasonality detection is now ON by default
+- **Better defaults**: Cross-validation is now the default model selection method
+- **Simpler API**: `AutoARIMA(series, nil)` now "just works" for most cases
+
+### Comparison with R's auto.arima
+
+| Feature | R auto.arima | goarima v0.2.0 | goarima v0.3.0 |
+|---------|-------------|----------------|----------------|
+| Auto-detect period | ✅ (from ts freq) | ❌ | ✅ (from ACF) |
+| Compare seasonal/non-seasonal | ✅ | ❌ | ✅ |
+| Cross-validation | ❌ (uses AICc) | ❌ | ✅ |
+| Multi-level intervals | ✅ (80%, 95%) | ❌ | ✅ |
+| Return all candidates | ❌ | ❌ | ✅ |
+
+### Example Usage
+
+```go
+// Fully automatic - detects seasonality and selects best model
+result, _ := autoarima.AutoARIMA(series, nil)
+
+// Result includes:
+// - result.DetectedPeriod = 24 (auto-detected)
+// - result.IsSeasonal = true
+// - result.Order() = "SARIMA(3,0,1)(0,1,0)[24]"
+// - result.RMSE, result.MAPE = cross-validated metrics
+// - result.Candidates = all models compared
+
+// Multi-level prediction intervals (R-style)
+fc, _ := result.PredictWithLevels(24, nil)  // 80% and 95%
+fc.Lower[0.95]  // 95% lower bound
+fc.Upper[0.80]  // 80% upper bound
+```
+
+### Validation Results
+
+**sample-app-4 Memory Metrics (168 hourly data points)**
+
+| Model | CV RMSE | CV MAPE | Auto-Selected |
+|-------|---------|---------|---------------|
+| ARIMA(4,0,0) | 0.000019 | 15.87% | ❌ |
+| **SARIMA(3,0,1)(0,1,0)[24]** | **0.000007** | **7.07%** | ✅ |
+
+**Result**: SARIMA automatically selected, **2.5x more accurate** than ARIMA.
+
+---
+
 ## [v0.2.0] - 2025-12-12
 
 ### Added

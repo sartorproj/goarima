@@ -250,9 +250,12 @@ func fitNonSeasonalModels(result *DatasetResult, train, test *timeseries.Series,
 		}
 	}
 
-	// Auto-ARIMA with AICc criterion
+	// Auto-ARIMA with AICc criterion (non-seasonal)
 	cfg := autoarima.DefaultConfig()
-	cfg.MaxP, cfg.MaxQ, cfg.Criterion = 3, 3, "aicc"
+	cfg.MaxP, cfg.MaxQ = 3, 3
+	cfg.Criterion = "aicc"
+	cfg.AutoSeasonal = false // Disable auto-seasonality for non-seasonal data
+	cfg.CompareModels = false
 	if auto, err := autoarima.AutoARIMA(train, cfg); err == nil && auto.Model != nil {
 		forecasts, _ := auto.Predict(testSize)
 		rmse, mae, mape := metrics(test.Values, forecasts)
@@ -293,12 +296,15 @@ func fitSeasonalModels(result *DatasetResult, train, test *timeseries.Series, pe
 		}
 	}
 
-	// Auto-SARIMA with AICc criterion
+	// Auto-SARIMA with AICc criterion - force the known period
 	cfg := autoarima.DefaultConfig()
-	cfg.Seasonal, cfg.SeasonalM = true, period
+	cfg.AutoSeasonal = true
+	cfg.SeasonalPeriods = []int{period} // Force the known period
+	cfg.SeasonalityThreshold = 0.1      // Low threshold to ensure detection
 	cfg.MaxP, cfg.MaxQ, cfg.MaxSP, cfg.MaxSQ = 2, 2, 2, 2
 	cfg.Criterion = "aicc"
-	if auto, err := autoarima.AutoARIMA(train, cfg); err == nil && auto.SeasonalModel != nil {
+	cfg.CompareModels = false // Only fit seasonal since we know it's seasonal
+	if auto, err := autoarima.AutoARIMA(train, cfg); err == nil && auto.IsSeasonal && auto.SeasonalModel != nil {
 		forecasts, _ := auto.Predict(testSize)
 		rmse, mae, mape := metrics(test.Values, forecasts)
 		order := fmt.Sprintf("(%d,%d,%d)(%d,%d,%d)[%d]", auto.P, auto.D, auto.Q, auto.SP, auto.SD, auto.SQ, auto.M)

@@ -206,7 +206,9 @@ func main() {
 }
 ```
 
-### Automatic Model Selection
+### Automatic Model Selection (v0.3.0+)
+
+**New in v0.3.0**: Auto-ARIMA now automatically detects seasonality and compares models!
 
 ```go
 package main
@@ -221,40 +223,50 @@ func main() {
     values := []float64{/* your data */}
     series := timeseries.New(values)
 
-    // Configure auto-ARIMA
-    config := autoarima.DefaultConfig()
-    config.MaxP = 3
-    config.MaxQ = 3
-    config.Criterion = "aicc" // Use corrected AIC (recommended)
-    config.Stepwise = true    // Use Hyndman-Khandakar stepwise search
+    // Fully automatic - detects seasonality, compares ARIMA vs SARIMA!
+    result, _ := autoarima.AutoARIMA(series, nil)
 
-    // Find best model
-    result, _ := autoarima.AutoARIMA(series, config)
+    // Result includes auto-detected seasonality
+    fmt.Printf("Best model: %s\n", result.Order())
+    fmt.Printf("Detected period: %d (ACF: %.4f)\n",
+        result.DetectedPeriod, result.SeasonalityStrength)
+    fmt.Printf("Is seasonal: %v\n", result.IsSeasonal)
 
-    fmt.Printf("Best model: ARIMA(%d,%d,%d)\n", result.P, result.D, result.Q)
-    fmt.Printf("AIC: %.2f, Models evaluated: %d\n", result.AIC, result.ModelsEvaluated)
+    // See all models that were compared
+    for _, c := range result.Candidates {
+        fmt.Printf("  %s: RMSE=%.4f, MAPE=%.2f%%\n", c.Name, c.RMSE, c.MAPE)
+    }
 
-    // Make predictions
-    forecasts, _ := result.Predict(5)
-    fmt.Println("Forecasts:", forecasts)
+    // Make predictions with R-style multi-level intervals
+    fc, _ := result.PredictWithLevels(12, nil) // 80% and 95% by default
+    fmt.Printf("Forecasts: %v\n", fc.Forecasts)
+    fmt.Printf("80%% interval: %v to %v\n", fc.Lower[0.80], fc.Upper[0.80])
+    fmt.Printf("95%% interval: %v to %v\n", fc.Lower[0.95], fc.Upper[0.95])
 }
 ```
 
-### Seasonal Auto-ARIMA
+### Custom Configuration
 
 ```go
+// Customize auto-ARIMA behavior
 config := autoarima.DefaultConfig()
-config.Seasonal = true
-config.SeasonalM = 12  // Monthly data with yearly seasonality
-config.MaxSP = 2
-config.MaxSQ = 2
-config.Criterion = "aicc"
+config.SeasonalPeriods = []int{24, 168}  // Only check daily/weekly
+config.SeasonalityThreshold = 0.5        // Higher threshold for detection
+config.ModelSelection = "cv"              // Cross-validation (default)
+config.CompareModels = true               // Compare ARIMA vs SARIMA
 
 result, _ := autoarima.AutoARIMA(series, config)
-fmt.Printf("Best model: SARIMA(%d,%d,%d)(%d,%d,%d)[%d]\n",
-    result.P, result.D, result.Q,
-    result.SP, result.SD, result.SQ, result.M)
 ```
+
+### Key v0.3.0 Features
+
+| Feature | Description |
+|---------|-------------|
+| **Auto-seasonality** | Detects seasonal period from ACF analysis |
+| **Model comparison** | Automatically compares ARIMA vs SARIMA |
+| **Cross-validation** | Uses CV for model selection (not just AIC) |
+| **Multi-level intervals** | Returns 80% and 95% intervals like R |
+| **Simple API** | `AutoARIMA(series, nil)` just works! |
 
 ## Statistical Tests
 

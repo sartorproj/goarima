@@ -85,16 +85,16 @@ def create_metrics_table(data):
     has_suggested = any(m.get('suggested_order') for m in models)
 
     # Build headers and values dynamically
-    headers = ['Model', 'AIC', 'AICc', 'BIC', 'RMSE', 'MAE', 'MAPE']
-    values = [
-        [f"{m['model_name']}{m['order']}" for m in models],
-        [f"{m['aic']:.2f}" for m in models],
-        [f"{m.get('aicc', m['aic']):.2f}" for m in models],
-        [f"{m['bic']:.2f}" for m in models],
-        [f"{m['rmse']:.4f}" for m in models],
-        [f"{m['mae']:.4f}" for m in models],
-        [f"{m['mape']:.2f}%" for m in models],
-    ]
+        headers = ['Model', 'AIC', 'AICc', 'BIC', 'RMSE', 'MAE', 'MAPE']
+        values = [
+            [f"{m['model_name']}{m['order']}" for m in models],
+            [f"{m['aic']:.2f}" for m in models],
+            [f"{m.get('aicc', m['aic']):.2f}" for m in models],
+            [f"{m['bic']:.2f}" for m in models],
+            [f"{m['rmse']:.4f}" for m in models],
+            [f"{m['mae']:.4f}" for m in models],
+            [f"{m['mape']:.2f}%" for m in models],
+        ]
 
     # Add suggested order column for Auto models
     if has_suggested:
