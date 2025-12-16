@@ -3,8 +3,8 @@ venv/
 .venv/
 
 # Generated files
-examples/demo/charts/
-examples/demo/forecast_results.json
+demo/charts/
+demo/forecast_results.json
 
 # IDE
 .idea/
