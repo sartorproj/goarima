@@ -140,12 +140,12 @@ func LoadCSVFromReader(r io.Reader, opts *CSVOptions) (*Series, error) {
 			if err != nil {
 				continue // Skip invalid values
 			}
-			values = append(values, val)
 
 			// Parse date if available
+			var ts time.Time
+			dateOK := false
 			if dateIdx >= 0 && dateIdx < len(record) {
 				dateStr := strings.TrimSpace(strings.Trim(record[dateIdx], "\""))
-				// Try multiple date formats
 				formats := []string{
 					opts.DateFormat,
 					"2006-01-02",
@@ -155,16 +155,19 @@ func LoadCSVFromReader(r io.Reader, opts *CSVOptions) (*Series, error) {
 					"02-Jan-2006",
 					"2006",
 				}
-				var ts time.Time
 				for _, fmt := range formats {
 					ts, err = time.Parse(fmt, dateStr)
 					if err == nil {
+						dateOK = true
 						break
 					}
 				}
-				if err == nil {
-					timestamps = append(timestamps, ts)
-				}
+			}
+
+			// Add value and timestamp together to keep them synchronized
+			values = append(values, val)
+			if dateOK {
+				timestamps = append(timestamps, ts)
 			}
 		}
 	}

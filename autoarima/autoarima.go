@@ -11,6 +11,7 @@ package autoarima
 import (
 	"math"
 	"sort"
+	"strconv"
 
 	"github.com/sartorproj/goarima/arima"
 	"github.com/sartorproj/goarima/sarima"
@@ -19,13 +20,13 @@ import (
 )
 
 // Common seasonal periods for different data frequencies.
-// These are checked during automatic period detection.
+// Use these with Config.SeasonalPeriods to specify what periods to check.
 var (
-	// HourlyPeriods are common periods for hourly data
-	HourlyPeriods = []int{6, 12, 24, 48, 168} // 6h, 12h, daily, 2-day, weekly
-	// DailyPeriods are common periods for daily data
-	DailyPeriods = []int{7, 14, 30, 365} // weekly, biweekly, monthly, yearly
-	// DefaultPeriods is the default set of periods to check
+	// HourlyPeriods are common periods for hourly data (6h, 12h, daily, 2-day, weekly).
+	HourlyPeriods = []int{6, 12, 24, 48, 168}
+	// DailyPeriods are common periods for daily data (weekly, biweekly, monthly, yearly).
+	DailyPeriods = []int{7, 14, 30, 365}
+	// DefaultPeriods is the default set of periods checked during auto-detection.
 	DefaultPeriods = []int{4, 6, 7, 12, 24, 52, 168, 365}
 )
 
@@ -158,6 +159,7 @@ type Result struct {
 	// Search information
 	ModelsEvaluated int
 	IsSeasonal      bool
+	FitErrors       []string // Errors from models that failed to fit (diagnostic)
 
 	// Seasonality detection
 	DetectedPeriod      int     // Auto-detected period (0 if none)
@@ -350,6 +352,9 @@ func detectSeasonalPeriod(series *timeseries.Series, config *Config) (period int
 }
 
 // determineDifferencing determines the optimal differencing order using stationarity tests.
+// When testType is "adf", uses ADF alone.
+// Otherwise (default "kpss"), uses combined KPSS+ADF for robustness:
+// stationary only if both agree, or KPSS is very confident (p > 0.1).
 func determineDifferencing(series *timeseries.Series, maxD int, testType string) int {
 	currentSeries := series
 
@@ -362,7 +367,7 @@ func determineDifferencing(series *timeseries.Series, maxD int, testType string)
 				isStationary = true
 			}
 		} else {
-			// Use both KPSS and ADF for more robust detection
+			// Combined KPSS + ADF for robust detection
 			kpssResult := stats.KPSS(currentSeries, "c", 0)
 			adfResult := stats.ADF(currentSeries, 0)
 
@@ -371,7 +376,7 @@ func determineDifferencing(series *timeseries.Series, maxD int, testType string)
 
 			if kpssStationary && adfStationary {
 				isStationary = true
-			} else if kpssStationary && kpssResult.PValue > 0.1 {
+			} else if kpssStationary && kpssResult != nil && kpssResult.PValue > 0.1 {
 				isStationary = true
 			}
 		}
@@ -390,18 +395,11 @@ func determineDifferencing(series *timeseries.Series, maxD int, testType string)
 }
 
 // determineSeasonalDifferencing determines optimal seasonal differencing.
-func determineSeasonalDifferencing(series *timeseries.Series, _, period int) int {
-	acf := stats.ACF(series, period*2)
-	if acf == nil {
-		return 0
+func determineSeasonalDifferencing(series *timeseries.Series, maxSD, period int) int {
+	if maxSD <= 0 {
+		maxSD = 1
 	}
-
-	// If strong autocorrelation at seasonal lag, need seasonal differencing
-	if len(acf) > period && math.Abs(acf[period]) > 0.5 {
-		return 1
-	}
-
-	return 0
+	return stats.NSDiffs(series, period, maxSD)
 }
 
 // fitBestARIMA fits the best non-seasonal ARIMA model.
@@ -528,6 +526,7 @@ func fitBestARIMA(series *timeseries.Series, d int, config *Config) *ModelCandid
 		AICc:       bestModel.AICc,
 		BIC:        bestModel.BIC,
 		LogLik:     bestModel.LogLik,
+		Rank:       len(evaluated), // track total models tried
 	}
 }
 
@@ -670,49 +669,95 @@ func fitBestSARIMA(series *timeseries.Series, d, sd, period int, config *Config)
 		AICc:        bestModel.AICc,
 		BIC:         bestModel.BIC,
 		LogLik:      bestModel.LogLik,
+		Rank:        len(evaluated), // track total models tried
 	}
 }
 
-// evaluateWithCV evaluates a candidate using time series cross-validation.
+// evaluateWithCV evaluates a candidate using expanding-window time series cross-validation.
+// Uses multiple folds (rolling origin) for robust out-of-sample evaluation.
 func evaluateWithCV(series *timeseries.Series, candidate *ModelCandidate, config *Config) {
 	n := series.Len()
+	folds := config.CVFolds
+	if folds < 1 {
+		folds = 5
+	}
+
 	testSize := int(float64(n) * config.TestRatio)
 	if testSize < 5 {
 		testSize = 5
 	}
-	if testSize > n/2 {
-		testSize = n / 2
+	if testSize > n/3 {
+		testSize = n / 3
 	}
 
-	trainSize := n - testSize
-	train := series.Slice(0, trainSize)
-	test := series.Slice(trainSize, n)
+	// Expanding window CV: each fold uses a progressively larger training set
+	// fold k: train = series[0..origin_k], test = series[origin_k..origin_k+horizon]
+	horizon := testSize / folds
+	if horizon < 1 {
+		horizon = 1
+	}
 
-	// Refit model on training data
-	var forecasts []float64
-	var err error
+	minTrain := n / 2 // minimum training size
+	if minTrain < 30 {
+		minTrain = 30
+	}
 
-	if candidate.IsSeasonal {
-		model := sarima.New(candidate.P, candidate.D, candidate.Q, candidate.SP, candidate.SD, candidate.SQ, candidate.Period)
-		if err = model.Fit(train); err == nil {
-			forecasts, err = model.Predict(testSize)
+	var totalRMSE, totalMAE, totalMAPE float64
+	validFolds := 0
+
+	for fold := 0; fold < folds; fold++ {
+		origin := minTrain + fold*(n-minTrain-horizon)/max(folds-1, 1)
+		if origin+horizon > n {
+			break
 		}
-	} else {
-		model := arima.New(candidate.P, candidate.D, candidate.Q)
-		if err = model.Fit(train); err == nil {
-			forecasts, err = model.Predict(testSize)
+
+		train := series.Slice(0, origin)
+		test := series.Slice(origin, min(origin+horizon, n))
+
+		var forecasts []float64
+		var err error
+
+		if candidate.IsSeasonal {
+			model := sarima.New(candidate.P, candidate.D, candidate.Q, candidate.SP, candidate.SD, candidate.SQ, candidate.Period)
+			if model == nil {
+				continue
+			}
+			if err = model.Fit(train); err == nil {
+				forecasts, err = model.Predict(test.Len())
+			}
+		} else {
+			model := arima.New(candidate.P, candidate.D, candidate.Q)
+			if model == nil {
+				continue
+			}
+			if err = model.Fit(train); err == nil {
+				forecasts, err = model.Predict(test.Len())
+			}
+		}
+
+		if err != nil || forecasts == nil {
+			continue
+		}
+
+		rmse, mae, mape := calculateMetrics(test.Values, forecasts)
+		if !math.IsInf(rmse, 1) {
+			totalRMSE += rmse
+			totalMAE += mae
+			totalMAPE += mape
+			validFolds++
 		}
 	}
 
-	if err != nil || forecasts == nil {
+	if validFolds == 0 {
 		candidate.RMSE = math.Inf(1)
 		candidate.MAE = math.Inf(1)
 		candidate.MAPE = math.Inf(1)
 		return
 	}
 
-	// Calculate metrics
-	candidate.RMSE, candidate.MAE, candidate.MAPE = calculateMetrics(test.Values, forecasts)
+	candidate.RMSE = totalRMSE / float64(validFolds)
+	candidate.MAE = totalMAE / float64(validFolds)
+	candidate.MAPE = totalMAPE / float64(validFolds)
 }
 
 // calculateMetrics calculates RMSE, MAE, and MAPE.
@@ -732,6 +777,58 @@ func calculateMetrics(actual, predicted []float64) (rmse, mae, mape float64) {
 	}
 
 	return math.Sqrt(rmse / float64(n)), mae / float64(n), mape / float64(n)
+}
+
+// CalculateMASE computes Mean Absolute Scaled Error.
+// MASE = MAE / mean(|naiveForecastError|) where naive forecast is y_{t-1}.
+// MASE < 1 means the model outperforms a naive forecast.
+func CalculateMASE(actual, predicted, trainingData []float64) float64 {
+	n := min(len(actual), len(predicted))
+	if n == 0 || len(trainingData) < 2 {
+		return math.Inf(1)
+	}
+
+	// MAE of forecast
+	mae := 0.0
+	for i := 0; i < n; i++ {
+		mae += math.Abs(actual[i] - predicted[i])
+	}
+	mae /= float64(n)
+
+	// MAE of naive forecast on training data
+	naiveMAE := 0.0
+	for i := 1; i < len(trainingData); i++ {
+		naiveMAE += math.Abs(trainingData[i] - trainingData[i-1])
+	}
+	naiveMAE /= float64(len(trainingData) - 1)
+
+	if naiveMAE == 0 {
+		return math.Inf(1)
+	}
+	return mae / naiveMAE
+}
+
+// CalculateSMAPE computes Symmetric Mean Absolute Percentage Error.
+// sMAPE = 200 * mean(|actual - predicted| / (|actual| + |predicted|))
+func CalculateSMAPE(actual, predicted []float64) float64 {
+	n := min(len(actual), len(predicted))
+	if n == 0 {
+		return math.Inf(1)
+	}
+
+	smape := 0.0
+	count := 0
+	for i := 0; i < n; i++ {
+		denom := math.Abs(actual[i]) + math.Abs(predicted[i])
+		if denom > 0 {
+			smape += math.Abs(actual[i]-predicted[i]) / denom
+			count++
+		}
+	}
+	if count == 0 {
+		return 0
+	}
+	return 200 * smape / float64(count)
 }
 
 // selectBestModel selects the best model from candidates.
@@ -885,28 +982,25 @@ func countSignificantLags(values []float64, confBound float64, maxLag int) int {
 }
 
 func countModelsEvaluated(candidates []ModelCandidate) int {
-	// This is approximate since we don't track all models in stepwise
-	return len(candidates)
+	total := 0
+	for _, c := range candidates {
+		total += c.Rank // Rank is repurposed: set to models-tried count by fit functions
+	}
+	if total == 0 {
+		total = len(candidates)
+	}
+	return total
 }
 
 func formatARIMAOrder(p, d, q int) string {
-	return "ARIMA(" + itoa(p) + "," + itoa(d) + "," + itoa(q) + ")"
+	return "ARIMA(" + strconv.Itoa(p) + "," + strconv.Itoa(d) + "," + strconv.Itoa(q) + ")"
 }
 
 func formatSARIMAOrder(p, d, q, sp, sd, sq, m int) string {
-	return "SARIMA(" + itoa(p) + "," + itoa(d) + "," + itoa(q) + ")(" +
-		itoa(sp) + "," + itoa(sd) + "," + itoa(sq) + ")[" + itoa(m) + "]"
+	return "SARIMA(" + strconv.Itoa(p) + "," + strconv.Itoa(d) + "," + strconv.Itoa(q) + ")(" +
+		strconv.Itoa(sp) + "," + strconv.Itoa(sd) + "," + strconv.Itoa(sq) + ")[" + strconv.Itoa(m) + "]"
 }
 
-func itoa(i int) string {
-	if i < 0 {
-		return "-" + itoa(-i)
-	}
-	if i < 10 {
-		return string(rune('0' + i))
-	}
-	return itoa(i/10) + string(rune('0'+i%10))
-}
 
 // Predict generates forecasts using the selected model.
 func (r *Result) Predict(steps int) ([]float64, error) {

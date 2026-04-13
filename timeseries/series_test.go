@@ -116,15 +116,34 @@ func TestDiff(t *testing.T) {
 }
 
 func TestDiffN(t *testing.T) {
+	// DiffN(2) applies Diff() twice (second-order difference)
 	s := New([]float64{1, 3, 6, 10, 15, 21})
 	diff2 := s.DiffN(2)
 
-	expected := []float64{5, 7, 9, 11}
+	// First diff: [2, 3, 4, 5, 6], second diff: [1, 1, 1, 1]
+	expected := []float64{1, 1, 1, 1}
 	if len(diff2.Values) != len(expected) {
 		t.Errorf("Expected length %d, got %d", len(expected), len(diff2.Values))
 	}
 
 	for i, v := range diff2.Values {
+		if math.Abs(v-expected[i]) > 1e-10 {
+			t.Errorf("Expected %f at index %d, got %f", expected[i], i, v)
+		}
+	}
+}
+
+func TestDiffLag(t *testing.T) {
+	// DiffLag(2) computes y[t] - y[t-2]
+	s := New([]float64{1, 3, 6, 10, 15, 21})
+	lag2 := s.DiffLag(2)
+
+	expected := []float64{5, 7, 9, 11}
+	if len(lag2.Values) != len(expected) {
+		t.Errorf("Expected length %d, got %d", len(expected), len(lag2.Values))
+	}
+
+	for i, v := range lag2.Values {
 		if math.Abs(v-expected[i]) > 1e-10 {
 			t.Errorf("Expected %f at index %d, got %f", expected[i], i, v)
 		}

@@ -26,7 +26,10 @@ func ACF(series *timeseries.Series, maxLag int) []float64 {
 	}
 
 	if variance == 0 {
-		return nil
+		// Constant series: ACF at lag 0 is 1, all others are 0
+		acf := make([]float64, maxLag+1)
+		acf[0] = 1.0
+		return acf
 	}
 
 	acf := make([]float64, maxLag+1)
@@ -42,7 +45,7 @@ func ACF(series *timeseries.Series, maxLag int) []float64 {
 }
 
 // PACF calculates the Partial Autocorrelation Function using the Durbin-Levinson algorithm.
-// Returns PACF values for lags 1 to maxLag.
+// Returns PACF values for lags 0 to maxLag.
 func PACF(series *timeseries.Series, maxLag int) []float64 {
 	n := series.Len()
 	if maxLag >= n {
@@ -79,7 +82,11 @@ func PACF(series *timeseries.Series, maxLag int) []float64 {
 		}
 
 		if den == 0 {
+			// P2-17: When denominator is zero, set phi[k] appropriately
 			pacf[k] = 0
+			for j := 1; j < k; j++ {
+				phi[k][j] = phi[k-1][j]
+			}
 			continue
 		}
 

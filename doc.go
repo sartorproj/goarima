@@ -39,6 +39,11 @@
 //   - stats: Statistical tests and analysis functions
 //   - timeseries: Time series data structures and utilities
 //
+// # Thread Safety
+//
+// Model instances are not safe for concurrent use. Each goroutine should use
+// its own model instance. The stats package functions are safe for concurrent use.
+//
 // # References
 //
 //   - Hyndman, R.J., & Athanasopoulos, G. (2021). Forecasting: Principles and Practice
