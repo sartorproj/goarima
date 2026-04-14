@@ -366,7 +366,7 @@ func InverseBoxCoxWithBias(value, variance, lambda float64) float64 {
 		return math.NaN()
 	}
 	base := math.Pow(inner, 1/lambda)
-	correction := 1 + variance*(1-lambda)/(2*math.Pow(inner, 2))
+	correction := 1 + variance*(1-lambda)/(2*inner*inner)
 	return base * correction
 }
 

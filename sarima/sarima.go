@@ -172,7 +172,7 @@ func (m *Model) fitCSS() error {
 
 // predict computes the one-step prediction at time t using the multiplicative SARIMA formula.
 // φ(B)·Φ(B^m)·z_t = θ(B)·Θ(B^m)·ε_t with cross-product terms.
-func (m *Model) predict(t int, y []float64, residuals []float64, intercept float64) float64 {
+func (m *Model) predict(t int, y, residuals []float64, intercept float64) float64 {
 	p := m.Order.P
 	q := m.Order.Q
 	sp := m.Order.SP
@@ -487,16 +487,17 @@ func (m *Model) estimateStdErrors(y []float64) {
 		minus[idx] -= eps
 
 		var ssePlus, sseMinus float64
-		if isAR && !isSeasonal {
+		switch {
+		case isAR && !isSeasonal:
 			ssePlus = computeSSE(plus, m.MACoeffs, m.SARCoeffs, m.SMACoeffs)
 			sseMinus = computeSSE(minus, m.MACoeffs, m.SARCoeffs, m.SMACoeffs)
-		} else if !isAR && !isSeasonal {
+		case !isAR && !isSeasonal:
 			ssePlus = computeSSE(m.ARCoeffs, plus, m.SARCoeffs, m.SMACoeffs)
 			sseMinus = computeSSE(m.ARCoeffs, minus, m.SARCoeffs, m.SMACoeffs)
-		} else if isAR && isSeasonal {
+		case isAR && isSeasonal:
 			ssePlus = computeSSE(m.ARCoeffs, m.MACoeffs, plus, m.SMACoeffs)
 			sseMinus = computeSSE(m.ARCoeffs, m.MACoeffs, minus, m.SMACoeffs)
-		} else {
+		default:
 			ssePlus = computeSSE(m.ARCoeffs, m.MACoeffs, m.SARCoeffs, plus)
 			sseMinus = computeSSE(m.ARCoeffs, m.MACoeffs, m.SARCoeffs, minus)
 		}

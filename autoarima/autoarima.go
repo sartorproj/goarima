@@ -1042,11 +1042,12 @@ func (r *Result) Predict(steps int) ([]float64, error) {
 // If Box-Cox was applied, forecasts and intervals are automatically back-transformed
 // with bias correction.
 func (r *Result) PredictWithInterval(steps int, confidence float64) (forecast, lower, upper []float64, err error) {
-	if r.IsSeasonal && r.SeasonalModel != nil {
+	switch {
+	case r.IsSeasonal && r.SeasonalModel != nil:
 		forecast, lower, upper, err = r.SeasonalModel.PredictWithInterval(steps, confidence)
-	} else if r.Model != nil {
+	case r.Model != nil:
 		forecast, lower, upper, err = r.Model.PredictWithInterval(steps, confidence)
-	} else {
+	default:
 		return nil, nil, nil, nil
 	}
 	if err != nil || !r.UsedBoxCox {
