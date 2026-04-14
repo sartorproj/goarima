@@ -320,3 +320,38 @@ func TestARIMAMultipleOrders(t *testing.T) {
 		})
 	}
 }
+
+func TestMLEImprovesCSSForMA(t *testing.T) {
+	// MA(1) model where MLE should outperform CSS
+	n := 300
+	theta := 0.6
+	values := make([]float64, n)
+	eps := make([]float64, n+1)
+	rng := uint64(42)
+	for i := range eps {
+		rng = rng*6364136223846793005 + 1442695040888963407
+		eps[i] = float64(int64(rng>>33)-int64(1<<30)) / float64(1<<30)
+	}
+	for i := 0; i < n; i++ {
+		values[i] = eps[i+1] + theta*eps[i]
+	}
+	series := timeseries.New(values)
+
+	cssModel := New(0, 0, 1)
+	if err := cssModel.Fit(series); err != nil {
+		t.Fatalf("CSS fit failed: %v", err)
+	}
+
+	mleModel := NewMLE(0, 0, 1)
+	if err := mleModel.Fit(series); err != nil {
+		t.Fatalf("MLE fit failed: %v", err)
+	}
+
+	t.Logf("True θ=%.2f", theta)
+	t.Logf("CSS: θ=%.4f, loglik=%.2f, σ²=%.4f", cssModel.MACoeffs[0], cssModel.LogLik, cssModel.Variance)
+	t.Logf("MLE: θ=%.4f, loglik=%.2f, σ²=%.4f", mleModel.MACoeffs[0], mleModel.LogLik, mleModel.Variance)
+
+	if mleModel.Method != "mle" {
+		t.Error("Expected method=mle")
+	}
+}

@@ -6,6 +6,8 @@ import (
 	"math"
 	"strconv"
 
+	"github.com/sartorproj/goarima/internal/optimize"
+	"github.com/sartorproj/goarima/internal/statespace"
 	"github.com/sartorproj/goarima/stats"
 	"github.com/sartorproj/goarima/timeseries"
 )
@@ -17,7 +19,7 @@ type Order struct {
 	Q int // MA order (number of moving average terms)
 }
 
-// Model represents an ARIMA(p,d,q) model fitted via Conditional Sum of Squares.
+// Model represents an ARIMA(p,d,q) model.
 // Use New() to create and Fit() to estimate parameters from data.
 type Model struct {
 	Order      Order
@@ -29,6 +31,7 @@ type Model struct {
 	AICc       float64 // Corrected AIC for small sample sizes
 	BIC        float64
 	LogLik     float64
+	Method     string // Estimation method: "css" (default) or "mle"
 	fitted     bool
 	data       *timeseries.Series
 	diffData   *timeseries.Series
@@ -40,7 +43,7 @@ type Model struct {
 	MAStdErrors []float64
 }
 
-// New creates a new ARIMA model with the specified order.
+// New creates a new ARIMA model with CSS estimation (default).
 // Returns nil if any order is negative.
 func New(p, d, q int) *Model {
 	if p < 0 || d < 0 || q < 0 {
@@ -50,7 +53,19 @@ func New(p, d, q int) *Model {
 		Order:    Order{P: p, D: d, Q: q},
 		ARCoeffs: make([]float64, p),
 		MACoeffs: make([]float64, q),
+		Method:   "css",
 	}
+}
+
+// NewMLE creates a new ARIMA model with exact MLE estimation via Kalman filter.
+// Uses CSS as initial guess, then refines with Nelder-Mead + Kalman filter.
+// Returns nil if any order is negative.
+func NewMLE(p, d, q int) *Model {
+	m := New(p, d, q)
+	if m != nil {
+		m.Method = "mle"
+	}
+	return m
 }
 
 // Fit fits the ARIMA model to the given time series data.
@@ -78,10 +93,15 @@ func (m *Model) Fit(series *timeseries.Series) error {
 	}
 	m.diffData = diffSeries
 
-	// Fit using Conditional Sum of Squares (CSS) method
+	// Fit using CSS first (always, as initial guess for MLE)
 	err := m.fitCSS()
 	if err != nil {
 		return err
+	}
+
+	// If MLE requested, refine with Kalman filter + Nelder-Mead
+	if m.Method == "mle" {
+		m.fitMLE()
 	}
 
 	// Calculate information criteria
@@ -388,6 +408,108 @@ func (m *Model) estimateStdErrors(y []float64) {
 		if hessianDiag > 0 {
 			m.MAStdErrors[i] = math.Sqrt(2 * m.Variance / hessianDiag)
 		}
+	}
+}
+
+// fitMLE refines CSS estimates using exact MLE via Kalman filter + Nelder-Mead.
+func (m *Model) fitMLE() {
+	y := m.diffData.Values
+	n := len(y)
+	p := m.Order.P
+	q := m.Order.Q
+
+	if n < p+q+5 {
+		return // Not enough data for MLE refinement
+	}
+
+	// Pack current CSS estimates as initial guess: [φ₁..φ_p, θ₁..θ_q, μ]
+	nParams := p + q + 1
+	x0 := make([]float64, nParams)
+	copy(x0[:p], m.ARCoeffs)
+	copy(x0[p:p+q], m.MACoeffs)
+	x0[p+q] = m.Intercept
+
+	// Objective: negative log-likelihood from Kalman filter
+	objective := func(params []float64) float64 {
+		ar := params[:p]
+		ma := params[p : p+q]
+		mu := params[p+q]
+
+		// Check stationarity/invertibility
+		absSum := 0.0
+		for _, v := range ar {
+			absSum += math.Abs(v)
+		}
+		if absSum >= 1.0 {
+			return 1e18
+		}
+		absSum = 0.0
+		for _, v := range ma {
+			absSum += math.Abs(v)
+		}
+		if absSum >= 1.0 {
+			return 1e18
+		}
+
+		ss := statespace.NewARMA(ar, ma, mu)
+		result := ss.Filter(y)
+		if result.LogLikelihood == math.Inf(-1) || math.IsNaN(result.LogLikelihood) {
+			return 1e18
+		}
+		return -result.LogLikelihood
+	}
+
+	result := optimize.NelderMead(objective, x0, &optimize.Options{
+		MaxIter: 2000,
+		Tol:     1e-8,
+	})
+
+	// Only accept MLE result if it improved the likelihood
+	mleLogLik := -result.Value
+	if mleLogLik > m.LogLik || m.LogLik == 0 {
+		copy(m.ARCoeffs, result.X[:p])
+		copy(m.MACoeffs, result.X[p:p+q])
+		m.Intercept = result.X[p+q]
+
+		// Get variance from Kalman filter
+		ss := statespace.NewARMA(m.ARCoeffs, m.MACoeffs, m.Intercept)
+		kResult := ss.Filter(y)
+		m.Variance = kResult.Sigma2
+		m.LogLik = kResult.LogLikelihood
+
+		// Recompute residuals with MLE parameters
+		m.recomputeResiduals(y)
+		m.estimateStdErrors(y)
+	}
+}
+
+// recomputeResiduals recalculates residuals and fitted values with current coefficients.
+func (m *Model) recomputeResiduals(y []float64) {
+	n := len(y)
+	p := m.Order.P
+	q := m.Order.Q
+
+	m.residuals = make([]float64, n)
+	m.fittedVals = make([]float64, n)
+
+	startIdx := max(p, q)
+	for t := 0; t < n; t++ {
+		if t < startIdx {
+			m.fittedVals[t] = m.Intercept
+			m.residuals[t] = y[t] - m.fittedVals[t]
+			continue
+		}
+
+		pred := m.Intercept
+		for i := 0; i < p && t-i-1 >= 0; i++ {
+			pred += m.ARCoeffs[i] * (y[t-i-1] - m.Intercept)
+		}
+		for i := 0; i < q && t-i-1 >= 0; i++ {
+			pred += m.MACoeffs[i] * m.residuals[t-i-1]
+		}
+
+		m.fittedVals[t] = pred
+		m.residuals[t] = y[t] - pred
 	}
 }
 
