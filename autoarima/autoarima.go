@@ -9,6 +9,7 @@
 package autoarima
 
 import (
+	"fmt"
 	"math"
 	"sort"
 	"strconv"
@@ -212,19 +213,26 @@ func AutoARIMA(series *timeseries.Series, config *Config) (*Result, error) {
 
 	// Step 0: Apply Box-Cox transformation if enabled
 	var bcLambda float64
+	var fitErrors []string
 	usedBoxCox := false
 	fitSeries := series
 	if config.BoxCox {
-		var err error
+		bcOK := true
 		if config.BoxCoxLambda != nil {
 			bcLambda = *config.BoxCoxLambda
+			if math.IsNaN(bcLambda) || math.IsInf(bcLambda, 0) {
+				fitErrors = append(fitErrors, fmt.Sprintf("Box-Cox: invalid lambda %v, skipping transformation", bcLambda))
+				bcOK = false
+			}
 		} else {
+			var err error
 			bcLambda, err = timeseries.BoxCoxLambda(series)
 			if err != nil {
-				bcLambda = 1 // fallback: no transform
+				fitErrors = append(fitErrors, fmt.Sprintf("Box-Cox: auto-lambda failed (%v), skipping transformation", err))
+				bcOK = false
 			}
 		}
-		if bcLambda != 1 {
+		if bcOK {
 			fitSeries = series.BoxCox(bcLambda)
 			usedBoxCox = true
 		}
@@ -304,6 +312,7 @@ func AutoARIMA(series *timeseries.Series, config *Config) (*Result, error) {
 		DetectionMethod:     detectionMethod,
 		UsedBoxCox:          usedBoxCox,
 		BoxCoxLambda:        bcLambda,
+		FitErrors:           fitErrors,
 		Candidates:          candidates,
 	}
 
@@ -781,7 +790,7 @@ func evaluateWithCV(series, originalSeries *timeseries.Series, candidate *ModelC
 		}
 
 		rmse, mae, mape := calculateMetrics(actualValues, forecasts)
-		if !math.IsInf(rmse, 1) {
+		if !math.IsInf(rmse, 1) && !math.IsNaN(rmse) && !math.IsNaN(mae) && !math.IsNaN(mape) {
 			totalRMSE += rmse
 			totalMAE += mae
 			totalMAPE += mape
