@@ -354,4 +354,11 @@ func TestMLEImprovesCSSForMA(t *testing.T) {
 	if mleModel.Method != "mle" {
 		t.Error("Expected method=mle")
 	}
+
+	// MLE should recover theta closer to true value for MA models
+	cssError := math.Abs(cssModel.MACoeffs[0] - theta)
+	mleError := math.Abs(mleModel.MACoeffs[0] - theta)
+	if mleError >= cssError {
+		t.Errorf("MLE should estimate theta closer to true value: CSS error=%.4f, MLE error=%.4f", cssError, mleError)
+	}
 }

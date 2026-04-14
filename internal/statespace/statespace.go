@@ -61,11 +61,11 @@ func NewARMA(ar, ma []float64, intercept float64) *Model {
 	// [φ_r 0   0   ... 0]
 	// First column: AR coefficients
 	for i := 0; i < p && i < r; i++ {
-		m.T[i*r] = ar[i] // T[i][0] = ar[i]
+		m.T[i*r] = ar[i] // first column of row i
 	}
 	// Superdiagonal: identity shift
 	for i := 0; i < r-1; i++ {
-		m.T[i*r+i+1] = 1.0 // T[i][i+1] = 1
+		m.T[i*r+i+1] = 1.0 // superdiagonal of row i
 	}
 
 	return m
@@ -173,26 +173,16 @@ func (m *Model) Filter(y []float64) *KalmanResult {
 			state[i] = predState[i] + K[i]*v
 		}
 
-		// Update P: P = predP - K · Z' · predP
-		// = predP - K · (Z' · predP)
-		// More numerically: P = (I - K·Z') · predP
+		// Update P: P[i][j] = predP[i][j] - K[i] * sum_k(Z[k] * predP[k][j])
 		for i := 0; i < r; i++ {
-			for j := 0; j < r; j++ {
-				P[i*r+j] = predP[i*r+j] - K[i]*m.Z[j]*F
-				// Wait, this should be: P = predP - K · Z' · predP
-				// Which is: P[i][j] = predP[i][j] - K[i] * sum_k(Z[k] * predP[k][j])
-			}
-		}
-		// Redo correctly:
-		for i := 0; i < r; i++ {
-			zPredP_j := make([]float64, r)
+			zPredPJ := make([]float64, r)
 			for j := 0; j < r; j++ {
 				for k := 0; k < r; k++ {
-					zPredP_j[j] += m.Z[k] * predP[k*r+j]
+					zPredPJ[j] += m.Z[k] * predP[k*r+j]
 				}
 			}
 			for j := 0; j < r; j++ {
-				P[i*r+j] = predP[i*r+j] - K[i]*zPredP_j[j]
+				P[i*r+j] = predP[i*r+j] - K[i]*zPredPJ[j]
 			}
 		}
 

@@ -422,6 +422,11 @@ func (m *Model) fitMLE() {
 		return // Not enough data for MLE refinement
 	}
 
+	// Compute CSS log-likelihood via Kalman filter for comparison
+	cssSS := statespace.NewARMA(m.ARCoeffs, m.MACoeffs, m.Intercept)
+	cssKalman := cssSS.Filter(y)
+	cssLogLik := cssKalman.LogLikelihood
+
 	// Pack current CSS estimates as initial guess: [φ₁..φ_p, θ₁..θ_q, μ]
 	nParams := p + q + 1
 	x0 := make([]float64, nParams)
@@ -435,7 +440,8 @@ func (m *Model) fitMLE() {
 		ma := params[p : p+q]
 		mu := params[p+q]
 
-		// Check stationarity/invertibility
+		// Check stationarity/invertibility (necessary but not sufficient condition;
+		// full root analysis of the characteristic polynomial would be more rigorous)
 		absSum := 0.0
 		for _, v := range ar {
 			absSum += math.Abs(v)
@@ -464,9 +470,9 @@ func (m *Model) fitMLE() {
 		Tol:     1e-8,
 	})
 
-	// Only accept MLE result if it improved the likelihood
+	// Only accept MLE result if it improved over CSS likelihood
 	mleLogLik := -result.Value
-	if mleLogLik > m.LogLik || m.LogLik == 0 {
+	if mleLogLik > cssLogLik {
 		copy(m.ARCoeffs, result.X[:p])
 		copy(m.MACoeffs, result.X[p:p+q])
 		m.Intercept = result.X[p+q]
@@ -478,13 +484,13 @@ func (m *Model) fitMLE() {
 		m.LogLik = kResult.LogLikelihood
 
 		// Recompute residuals with MLE parameters
-		m.recomputeResiduals(y)
+		m.computeResidualsAndFitted(y)
 		m.estimateStdErrors(y)
 	}
 }
 
-// recomputeResiduals recalculates residuals and fitted values with current coefficients.
-func (m *Model) recomputeResiduals(y []float64) {
+// computeResidualsAndFitted computes residuals and fitted values for the current coefficients.
+func (m *Model) computeResidualsAndFitted(y []float64) {
 	n := len(y)
 	p := m.Order.P
 	q := m.Order.Q

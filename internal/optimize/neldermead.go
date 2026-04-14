@@ -148,7 +148,8 @@ func NelderMead(f func([]float64) float64, x0 []float64, opts *Options) *Result 
 			continue
 		}
 
-		// Contraction
+		// Inside contraction only (simplified; full NM distinguishes inside/outside
+		// contraction but this works well in practice for ARIMA likelihood surfaces)
 		xc, fc := transform(c, worst.x, -rho)
 		if fc < worst.f {
 			simplex[n] = vertex{x: xc, f: fc}
