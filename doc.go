@@ -13,6 +13,7 @@
 //   - Autocorrelation analysis (ACF, PACF)
 //   - Differencing analysis (ndiffs, nsdiffs)
 //   - Time series decomposition (classical and STL)
+//   - Box-Cox variance-stabilizing transformation with automatic lambda selection
 //
 // # Quick Start
 //

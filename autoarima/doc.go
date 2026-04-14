@@ -48,7 +48,20 @@
 //	    Criterion:    "aicc",   // "aic", "aicc", or "bic"
 //	    Stepwise:     true,     // Use stepwise search
 //	    StationTest:  "kpss",   // "adf" or "kpss"
+//	    BoxCox:       true,     // Apply Box-Cox variance stabilization
 //	}
+//
+// # Variance Stabilization
+//
+// Use Box-Cox transformation to stabilize variance before fitting:
+//
+//	config := autoarima.DefaultConfig()
+//	config.BoxCox = true  // Auto-select lambda via profile likelihood
+//	result, _ := autoarima.AutoARIMA(series, config)
+//
+//	// Forecasts are automatically back-transformed with bias correction
+//	forecasts, _ := result.Predict(12)
+//	fmt.Printf("Lambda used: %.2f\n", result.BoxCoxLambda)
 //
 // # Search Methods
 //

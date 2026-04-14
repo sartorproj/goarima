@@ -272,6 +272,27 @@ func fitNonSeasonalModels(result *DatasetResult, train, test *timeseries.Series,
 			ModelsEvaluated: auto.ModelsEvaluated, SuggestedOrder: suggestedOrder,
 		})
 	}
+
+	// Auto-ARIMA with Box-Cox (non-seasonal)
+	bcCfg := autoarima.DefaultConfig()
+	bcCfg.MaxP, bcCfg.MaxQ = 3, 3
+	bcCfg.AutoSeasonal = false
+	bcCfg.CompareModels = false
+	bcCfg.BoxCox = true
+	if train.Min() > 0 { // Box-Cox requires positive values
+		if auto, err := autoarima.AutoARIMA(train, bcCfg); err == nil && auto.Model != nil {
+			forecasts, _ := auto.Predict(testSize)
+			rmse, mae, mape := metrics(test.Values, forecasts)
+			order := fmt.Sprintf("(%d,%d,%d)", auto.P, auto.D, auto.Q)
+			bcInfo := fmt.Sprintf("λ=%.2f", auto.BoxCoxLambda)
+			fmt.Printf("   Auto-ARIMA%s+BoxCox(%s): RMSE=%.4f\n", order, bcInfo, rmse)
+			result.Models = append(result.Models, ForecastResult{
+				ModelName: "Auto-ARIMA+BoxCox", Order: order, AIC: auto.AIC, AICc: auto.AICc,
+				BIC: auto.BIC, RMSE: rmse, MAE: mae, MAPE: mape, Forecasts: forecasts,
+				SuggestedOrder: bcInfo,
+			})
+		}
+	}
 }
 
 // fitSeasonalModels fits SARIMA models for seasonal data
