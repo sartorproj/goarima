@@ -61,8 +61,8 @@ type Config struct {
 	SimplerThreshold float64 // RMSE difference threshold to prefer simpler model (default: 0.05)
 
 	// Box-Cox transformation
-	BoxCox       bool    // Apply Box-Cox variance stabilization before fitting (default: false)
-	BoxCoxLambda float64 // Fixed lambda (0 = auto-select via profile likelihood; default: 0)
+	BoxCox       bool     // Apply Box-Cox variance stabilization before fitting (default: false)
+	BoxCoxLambda *float64 // Fixed lambda (nil = auto-select via profile likelihood; default: nil)
 
 	// Trace/debug settings
 	Trace bool // Print progress (default: false)
@@ -216,8 +216,8 @@ func AutoARIMA(series *timeseries.Series, config *Config) (*Result, error) {
 	fitSeries := series
 	if config.BoxCox {
 		var err error
-		if config.BoxCoxLambda != 0 {
-			bcLambda = config.BoxCoxLambda
+		if config.BoxCoxLambda != nil {
+			bcLambda = *config.BoxCoxLambda
 		} else {
 			bcLambda, err = timeseries.BoxCoxLambda(series)
 			if err != nil {
@@ -236,18 +236,18 @@ func AutoARIMA(series *timeseries.Series, config *Config) (*Result, error) {
 	detectionMethod := "none"
 
 	if config.AutoSeasonal {
-		detectedPeriod, seasonalityStrength = detectSeasonalPeriod(series, config)
+		detectedPeriod, seasonalityStrength = detectSeasonalPeriod(fitSeries, config)
 		if detectedPeriod > 0 {
 			detectionMethod = "acf"
 		}
 	}
 
 	// Step 2: Determine differencing orders
-	d := determineDifferencing(series, config.MaxD, config.StationTest)
+	d := determineDifferencing(fitSeries, config.MaxD, config.StationTest)
 
 	sd := 0
 	if detectedPeriod > 0 && n >= detectedPeriod*2 {
-		sd = determineSeasonalDifferencing(series, config.MaxSD, detectedPeriod)
+		sd = determineSeasonalDifferencing(fitSeries, config.MaxSD, detectedPeriod)
 	}
 
 	// Step 3: Fit candidate models
@@ -274,7 +274,7 @@ func AutoARIMA(series *timeseries.Series, config *Config) (*Result, error) {
 	// Step 4: Evaluate candidates using cross-validation
 	if config.ModelSelection == "cv" {
 		for i := range candidates {
-			evaluateWithCV(fitSeries, &candidates[i], config)
+			evaluateWithCV(fitSeries, series, &candidates[i], config, usedBoxCox, bcLambda)
 		}
 	}
 
@@ -705,7 +705,7 @@ func fitBestSARIMA(series *timeseries.Series, d, sd, period int, config *Config)
 
 // evaluateWithCV evaluates a candidate using expanding-window time series cross-validation.
 // Uses multiple folds (rolling origin) for robust out-of-sample evaluation.
-func evaluateWithCV(series *timeseries.Series, candidate *ModelCandidate, config *Config) {
+func evaluateWithCV(series, originalSeries *timeseries.Series, candidate *ModelCandidate, config *Config, usedBoxCox bool, bcLambda float64) {
 	n := series.Len()
 	folds := config.CVFolds
 	if folds < 1 {
@@ -769,7 +769,18 @@ func evaluateWithCV(series *timeseries.Series, candidate *ModelCandidate, config
 			continue
 		}
 
-		rmse, mae, mape := calculateMetrics(test.Values, forecasts)
+		// Back-transform forecasts to original scale for metric computation
+		actualValues := test.Values
+		if usedBoxCox {
+			backTransformed := make([]float64, len(forecasts))
+			for i, f := range forecasts {
+				backTransformed[i] = timeseries.InverseBoxCoxValue(f, bcLambda)
+			}
+			forecasts = backTransformed
+			actualValues = originalSeries.Slice(origin, min(origin+horizon, n)).Values
+		}
+
+		rmse, mae, mape := calculateMetrics(actualValues, forecasts)
 		if !math.IsInf(rmse, 1) {
 			totalRMSE += rmse
 			totalMAE += mae

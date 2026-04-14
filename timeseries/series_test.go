@@ -350,6 +350,43 @@ func TestBoxCoxLambdaLinear(t *testing.T) {
 	t.Logf("Linear data: lambda = %f", lambda)
 }
 
+func TestBoxCoxLambdaErrors(t *testing.T) {
+	// Short series
+	short := New([]float64{1, 2})
+	_, err := BoxCoxLambda(short)
+	if err == nil {
+		t.Error("Expected error for short series, got nil")
+	}
+
+	// Series with zero
+	withZero := New([]float64{1, 2, 0, 4, 5})
+	_, err = BoxCoxLambda(withZero)
+	if err == nil {
+		t.Error("Expected error for series with zero, got nil")
+	}
+
+	// Series with negative
+	withNeg := New([]float64{1, 2, -3, 4, 5})
+	_, err = BoxCoxLambda(withNeg)
+	if err == nil {
+		t.Error("Expected error for series with negative value, got nil")
+	}
+
+	// Series with NaN
+	withNaN := New([]float64{1, 2, math.NaN(), 4, 5})
+	_, err = BoxCoxLambda(withNaN)
+	if err == nil {
+		t.Error("Expected error for series with NaN, got nil")
+	}
+
+	// Series with Inf
+	withInf := New([]float64{1, 2, math.Inf(1), 4, 5})
+	_, err = BoxCoxLambda(withInf)
+	if err == nil {
+		t.Error("Expected error for series with Inf, got nil")
+	}
+}
+
 func TestInverseBoxCoxWithBias(t *testing.T) {
 	// Log case: E[exp(X)] = exp(mu + sigma²/2)
 	mu := 2.0

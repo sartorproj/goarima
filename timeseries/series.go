@@ -352,6 +352,18 @@ func (s *Series) InverseBoxCox(lambda float64) *Series {
 	}
 }
 
+// InverseBoxCoxValue applies the inverse Box-Cox transformation to a single scalar value.
+func InverseBoxCoxValue(value, lambda float64) float64 {
+	if math.Abs(lambda) < 1e-12 {
+		return math.Exp(value)
+	}
+	inner := lambda*value + 1
+	if inner <= 0 {
+		return math.NaN()
+	}
+	return math.Pow(inner, 1/lambda)
+}
+
 // InverseBoxCoxWithBias applies bias-corrected inverse Box-Cox transformation.
 // Standard inverse is biased: E[g⁻¹(X)] ≠ g⁻¹(E[X]) for nonlinear g.
 // Correction: ŷ = g⁻¹(μ) · [1 + σ²·(1-λ) / (2·g⁻¹(μ)^(2λ))]
@@ -438,9 +450,6 @@ func BoxCoxLambda(series *Series) (float64, error) {
 	// Prefer round values if within tolerance of optimal
 	roundValues := []float64{-1, -0.5, 0, 1.0 / 3.0, 0.5, 1, 2}
 	for _, rv := range roundValues {
-		if math.Abs(rv-bestLambda) > 0.15 {
-			continue
-		}
 		// Evaluate log-likelihood at round value
 		var sumZ, sumZ2 float64
 		for _, v := range series.Values {

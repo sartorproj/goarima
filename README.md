@@ -407,7 +407,7 @@ The AICc is preferred for model selection as it corrects for small sample sizes 
 
 - **Estimation method**: Uses Conditional Sum of Squares (CSS) with gradient descent. No exact MLE via Kalman filter. MA coefficient standard errors may be underestimated 15-25%.
 - **Univariate only**: No exogenous variable support (ARIMAX/SARIMAX).
-- **Box-Cox**: Supported via `series.BoxCox(lambda)` and `BoxCoxLambda()` for automatic selection. Integrated with Auto-ARIMA via `config.BoxCox = true`.
+- **Box-Cox**: Supported via `series.BoxCox(lambda)` and `timeseries.BoxCoxLambda(series)` for automatic selection. Integrated with Auto-ARIMA via `config.BoxCox = true`.
 - **Minimum data**: Requires at least `p + d + q + 10` observations for ARIMA, more for seasonal models.
 - **Not thread-safe**: Model instances should not be shared across goroutines.
 - **When ARIMA is inappropriate**: Non-stationary variance (use GARCH), multiple seasonalities (use TBATS/Prophet), very long series with structural breaks (use regime-switching models).
