@@ -405,7 +405,7 @@ The AICc is preferred for model selection as it corrects for small sample sizes 
 
 ## Limitations
 
-- **Estimation method**: Uses Conditional Sum of Squares (CSS) with gradient descent. No exact MLE via Kalman filter. MA coefficient standard errors may be underestimated 15-25%.
+- **Estimation method**: Default is CSS with gradient descent. Exact MLE via Kalman filter available with `arima.NewMLE(p,d,q)`. MLE is recommended for models with MA components.
 - **Univariate only**: No exogenous variable support (ARIMAX/SARIMAX).
 - **Box-Cox**: Supported via `series.BoxCox(lambda)` and `timeseries.BoxCoxLambda(series)` for automatic selection. Integrated with Auto-ARIMA via `config.BoxCox = true`.
 - **Minimum data**: Requires at least `p + d + q + 10` observations for ARIMA, more for seasonal models.
