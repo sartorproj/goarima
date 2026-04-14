@@ -21,7 +21,8 @@ type Order struct {
 	M  int // Seasonal period (e.g., 12 for monthly data with yearly seasonality)
 }
 
-// Model represents a SARIMA model.
+// Model represents a SARIMA(p,d,q)(P,D,Q)[m] model with multiplicative seasonal terms.
+// Use New() to create and Fit() to estimate parameters from data.
 type Model struct {
 	Order      Order
 	ARCoeffs   []float64 // Non-seasonal AR coefficients
@@ -48,7 +49,11 @@ type Model struct {
 }
 
 // New creates a new SARIMA model with the specified order.
+// Returns nil if any order is negative or period is non-positive.
 func New(p, d, q, sp, sd, sq, m int) *Model {
+	if p < 0 || d < 0 || q < 0 || sp < 0 || sd < 0 || sq < 0 || m <= 0 {
+		return nil
+	}
 	return &Model{
 		Order: Order{
 			P: p, D: d, Q: q,
@@ -68,6 +73,13 @@ func (m *Model) Fit(series *timeseries.Series) error {
 
 	if series.Len() < minLen {
 		return errors.New("insufficient data points for the specified order")
+	}
+
+	// Validate input for NaN/Inf
+	for _, v := range series.Values {
+		if math.IsNaN(v) || math.IsInf(v, 0) {
+			return errors.New("input series contains NaN or Inf values")
+		}
 	}
 
 	m.data = series
@@ -158,6 +170,72 @@ func (m *Model) fitCSS() error {
 	return nil
 }
 
+// predict computes the one-step prediction at time t using the multiplicative SARIMA formula.
+// φ(B)·Φ(B^m)·z_t = θ(B)·Θ(B^m)·ε_t with cross-product terms.
+func (m *Model) predict(t int, y []float64, residuals []float64, intercept float64) float64 {
+	p := m.Order.P
+	q := m.Order.Q
+	sp := m.Order.SP
+	sq := m.Order.SQ
+	period := m.Order.M
+
+	pred := intercept
+
+	// Non-seasonal AR: +φ_i * (y_{t-i} - μ)
+	for i := 0; i < p; i++ {
+		lag := i + 1
+		if t-lag >= 0 {
+			pred += m.ARCoeffs[i] * (y[t-lag] - intercept)
+		}
+	}
+
+	// Seasonal AR: +Φ_j * (y_{t-jm} - μ)
+	for j := 0; j < sp; j++ {
+		lag := (j + 1) * period
+		if t-lag >= 0 {
+			pred += m.SARCoeffs[j] * (y[t-lag] - intercept)
+		}
+	}
+
+	// Cross-product AR: -φ_i * Φ_j * (y_{t-i-jm} - μ)
+	for i := 0; i < p; i++ {
+		for j := 0; j < sp; j++ {
+			lag := (i + 1) + (j+1)*period
+			if t-lag >= 0 {
+				pred -= m.ARCoeffs[i] * m.SARCoeffs[j] * (y[t-lag] - intercept)
+			}
+		}
+	}
+
+	// Non-seasonal MA: +θ_i * ε_{t-i}
+	for i := 0; i < q; i++ {
+		lag := i + 1
+		if t-lag >= 0 {
+			pred += m.MACoeffs[i] * residuals[t-lag]
+		}
+	}
+
+	// Seasonal MA: +Θ_j * ε_{t-jm}
+	for j := 0; j < sq; j++ {
+		lag := (j + 1) * period
+		if t-lag >= 0 {
+			pred += m.SMACoeffs[j] * residuals[t-lag]
+		}
+	}
+
+	// Cross-product MA: +θ_i * Θ_j * ε_{t-i-jm}
+	for i := 0; i < q; i++ {
+		for j := 0; j < sq; j++ {
+			lag := (i + 1) + (j+1)*period
+			if t-lag >= 0 {
+				pred += m.MACoeffs[i] * m.SMACoeffs[j] * residuals[t-lag]
+			}
+		}
+	}
+
+	return pred
+}
+
 // optimizeCSS optimizes SARIMA parameters with adaptive learning and momentum.
 func (m *Model) optimizeCSS(y []float64) error {
 	n := len(y)
@@ -169,7 +247,7 @@ func (m *Model) optimizeCSS(y []float64) error {
 
 	maxIter := 200
 	tolerance := 1e-8
-	learningRate := 0.005
+	learningRate := 0.005 // Lower than ARIMA (0.01) due to more parameters and cross-product terms
 	momentum := 0.9
 	decay := 0.99
 
@@ -179,8 +257,13 @@ func (m *Model) optimizeCSS(y []float64) error {
 	sarMomentum := make([]float64, sp)
 	smaMomentum := make([]float64, sq)
 
-	// Start index to avoid boundary issues
-	startIdx := max(max(p, q), max(sp*period, sq*period))
+	// Start index must accommodate maximum lag from expanded polynomials
+	maxARLag := p + sp*period
+	maxMALag := q + sq*period
+	startIdx := max(maxARLag, maxMALag)
+	if startIdx >= n-10 {
+		startIdx = max(max(p, q), max(sp*period, sq*period))
+	}
 	if startIdx >= n-10 {
 		startIdx = 0
 	}
@@ -199,34 +282,7 @@ func (m *Model) optimizeCSS(y []float64) error {
 		currentSSE := 0.0
 
 		for t := startIdx; t < n; t++ {
-			pred := m.Intercept
-
-			// Non-seasonal AR component
-			for i := 0; i < p && t-i-1 >= 0; i++ {
-				pred += m.ARCoeffs[i] * (y[t-i-1] - m.Intercept)
-			}
-
-			// Seasonal AR component
-			for i := 0; i < sp; i++ {
-				lag := (i + 1) * period
-				if t-lag >= 0 {
-					pred += m.SARCoeffs[i] * (y[t-lag] - m.Intercept)
-				}
-			}
-
-			// Non-seasonal MA component
-			for i := 0; i < q && t-i-1 >= 0; i++ {
-				pred += m.MACoeffs[i] * residuals[t-i-1]
-			}
-
-			// Seasonal MA component
-			for i := 0; i < sq; i++ {
-				lag := (i + 1) * period
-				if t-lag >= 0 {
-					pred += m.SMACoeffs[i] * residuals[t-lag]
-				}
-			}
-
+			pred := m.predict(t, y, residuals, m.Intercept)
 			residuals[t] = y[t] - pred
 			currentSSE += residuals[t] * residuals[t]
 		}
@@ -248,36 +304,70 @@ func (m *Model) optimizeCSS(y []float64) error {
 			break
 		}
 
-		// Calculate gradients
+		// Calculate gradients (with cross-product terms)
 		arGrad := make([]float64, p)
 		maGrad := make([]float64, q)
 		sarGrad := make([]float64, sp)
 		smaGrad := make([]float64, sq)
 
 		for t := startIdx; t < n; t++ {
-			// AR gradients
-			for i := 0; i < p && t-i-1 >= 0; i++ {
-				arGrad[i] -= 2 * residuals[t] * (y[t-i-1] - m.Intercept)
-			}
-
-			// SAR gradients
-			for i := 0; i < sp; i++ {
-				lag := (i + 1) * period
+			// AR gradients: ∂pred/∂φ_i = (y_{t-i} - μ) - Σ_j Φ_j*(y_{t-i-jm} - μ)
+			for i := 0; i < p; i++ {
+				lag := i + 1
 				if t-lag >= 0 {
-					sarGrad[i] -= 2 * residuals[t] * (y[t-lag] - m.Intercept)
+					grad := y[t-lag] - m.Intercept
+					for j := 0; j < sp; j++ {
+						crossLag := lag + (j+1)*period
+						if t-crossLag >= 0 {
+							grad -= m.SARCoeffs[j] * (y[t-crossLag] - m.Intercept)
+						}
+					}
+					arGrad[i] -= 2 * residuals[t] * grad
 				}
 			}
 
-			// MA gradients
-			for i := 0; i < q && t-i-1 >= 0; i++ {
-				maGrad[i] -= 2 * residuals[t] * residuals[t-i-1]
+			// SAR gradients: ∂pred/∂Φ_j = (y_{t-jm} - μ) - Σ_i φ_i*(y_{t-i-jm} - μ)
+			for j := 0; j < sp; j++ {
+				lag := (j + 1) * period
+				if t-lag >= 0 {
+					grad := y[t-lag] - m.Intercept
+					for i := 0; i < p; i++ {
+						crossLag := (i + 1) + lag
+						if t-crossLag >= 0 {
+							grad -= m.ARCoeffs[i] * (y[t-crossLag] - m.Intercept)
+						}
+					}
+					sarGrad[j] -= 2 * residuals[t] * grad
+				}
 			}
 
-			// SMA gradients
-			for i := 0; i < sq; i++ {
-				lag := (i + 1) * period
+			// MA gradients: ∂pred/∂θ_i = ε_{t-i} + Σ_j Θ_j*ε_{t-i-jm}
+			for i := 0; i < q; i++ {
+				lag := i + 1
 				if t-lag >= 0 {
-					smaGrad[i] -= 2 * residuals[t] * residuals[t-lag]
+					grad := residuals[t-lag]
+					for j := 0; j < sq; j++ {
+						crossLag := lag + (j+1)*period
+						if t-crossLag >= 0 {
+							grad += m.SMACoeffs[j] * residuals[t-crossLag]
+						}
+					}
+					maGrad[i] -= 2 * residuals[t] * grad
+				}
+			}
+
+			// SMA gradients: ∂pred/∂Θ_j = ε_{t-jm} + Σ_i θ_i*ε_{t-i-jm}
+			for j := 0; j < sq; j++ {
+				lag := (j + 1) * period
+				if t-lag >= 0 {
+					grad := residuals[t-lag]
+					for i := 0; i < q; i++ {
+						crossLag := (i + 1) + lag
+						if t-crossLag >= 0 {
+							grad += m.MACoeffs[i] * residuals[t-crossLag]
+						}
+					}
+					smaGrad[j] -= 2 * residuals[t] * grad
 				}
 			}
 		}
@@ -307,8 +397,8 @@ func (m *Model) optimizeCSS(y []float64) error {
 		// Decay learning rate
 		learningRate *= decay
 
-		// Convergence check
-		if iter > 0 && math.Abs(currentSSE-bestSSE) < tolerance {
+		// Convergence check (relative tolerance)
+		if iter > 0 && bestSSE > 0 && math.Abs(currentSSE-bestSSE)/bestSSE < tolerance {
 			break
 		}
 	}
@@ -324,27 +414,7 @@ func (m *Model) optimizeCSS(y []float64) error {
 	m.fittedVals = make([]float64, n)
 
 	for t := 0; t < n; t++ {
-		pred := m.Intercept
-
-		for i := 0; i < p && t-i-1 >= 0; i++ {
-			pred += m.ARCoeffs[i] * (y[t-i-1] - m.Intercept)
-		}
-		for i := 0; i < sp; i++ {
-			lag := (i + 1) * period
-			if t-lag >= 0 {
-				pred += m.SARCoeffs[i] * (y[t-lag] - m.Intercept)
-			}
-		}
-		for i := 0; i < q && t-i-1 >= 0; i++ {
-			pred += m.MACoeffs[i] * m.residuals[t-i-1]
-		}
-		for i := 0; i < sq; i++ {
-			lag := (i + 1) * period
-			if t-lag >= 0 {
-				pred += m.SMACoeffs[i] * m.residuals[t-lag]
-			}
-		}
-
+		pred := m.predict(t, y, m.residuals, m.Intercept)
 		m.fittedVals[t] = pred
 		m.residuals[t] = y[t] - pred
 	}
@@ -364,13 +434,105 @@ func (m *Model) optimizeCSS(y []float64) error {
 		m.Variance = sse / float64(count)
 	}
 
+	// Estimate coefficient standard errors
+	m.estimateStdErrors(y)
+
 	return nil
+}
+
+// estimateStdErrors estimates standard errors for all coefficients using numerical Hessian.
+func (m *Model) estimateStdErrors(y []float64) {
+	n := len(y)
+	p := m.Order.P
+	q := m.Order.Q
+	sp := m.Order.SP
+	sq := m.Order.SQ
+
+	if p+q+sp+sq == 0 {
+		return
+	}
+
+	eps := 1e-5
+
+	computeSSE := func(arC, maC, sarC, smaC []float64) float64 {
+		residuals := make([]float64, n)
+		sse := 0.0
+		// Save/restore coefficients
+		origAR, origMA := m.ARCoeffs, m.MACoeffs
+		origSAR, origSMA := m.SARCoeffs, m.SMACoeffs
+		m.ARCoeffs, m.MACoeffs = arC, maC
+		m.SARCoeffs, m.SMACoeffs = sarC, smaC
+		startIdx := max(p+sp*m.Order.M, q+sq*m.Order.M)
+		if startIdx >= n {
+			startIdx = 0
+		}
+		for t := startIdx; t < n; t++ {
+			pred := m.predict(t, y, residuals, m.Intercept)
+			residuals[t] = y[t] - pred
+			sse += residuals[t] * residuals[t]
+		}
+		m.ARCoeffs, m.MACoeffs = origAR, origMA
+		m.SARCoeffs, m.SMACoeffs = origSAR, origSMA
+		return sse
+	}
+
+	baseSSE := computeSSE(m.ARCoeffs, m.MACoeffs, m.SARCoeffs, m.SMACoeffs)
+
+	perturbAndCompute := func(coeffs []float64, idx int, isSeasonal bool, isAR bool) float64 {
+		plus := make([]float64, len(coeffs))
+		minus := make([]float64, len(coeffs))
+		copy(plus, coeffs)
+		copy(minus, coeffs)
+		plus[idx] += eps
+		minus[idx] -= eps
+
+		var ssePlus, sseMinus float64
+		if isAR && !isSeasonal {
+			ssePlus = computeSSE(plus, m.MACoeffs, m.SARCoeffs, m.SMACoeffs)
+			sseMinus = computeSSE(minus, m.MACoeffs, m.SARCoeffs, m.SMACoeffs)
+		} else if !isAR && !isSeasonal {
+			ssePlus = computeSSE(m.ARCoeffs, plus, m.SARCoeffs, m.SMACoeffs)
+			sseMinus = computeSSE(m.ARCoeffs, minus, m.SARCoeffs, m.SMACoeffs)
+		} else if isAR && isSeasonal {
+			ssePlus = computeSSE(m.ARCoeffs, m.MACoeffs, plus, m.SMACoeffs)
+			sseMinus = computeSSE(m.ARCoeffs, m.MACoeffs, minus, m.SMACoeffs)
+		} else {
+			ssePlus = computeSSE(m.ARCoeffs, m.MACoeffs, m.SARCoeffs, plus)
+			sseMinus = computeSSE(m.ARCoeffs, m.MACoeffs, m.SARCoeffs, minus)
+		}
+
+		hessianDiag := (ssePlus - 2*baseSSE + sseMinus) / (eps * eps)
+		if hessianDiag > 0 {
+			return math.Sqrt(2 * m.Variance / hessianDiag)
+		}
+		return 0
+	}
+
+	m.ARStdErrors = make([]float64, p)
+	for i := 0; i < p; i++ {
+		m.ARStdErrors[i] = perturbAndCompute(m.ARCoeffs, i, false, true)
+	}
+
+	m.MAStdErrors = make([]float64, q)
+	for i := 0; i < q; i++ {
+		m.MAStdErrors[i] = perturbAndCompute(m.MACoeffs, i, false, false)
+	}
+
+	m.SARStdErrors = make([]float64, sp)
+	for i := 0; i < sp; i++ {
+		m.SARStdErrors[i] = perturbAndCompute(m.SARCoeffs, i, true, true)
+	}
+
+	m.SMAStdErrors = make([]float64, sq)
+	for i := 0; i < sq; i++ {
+		m.SMAStdErrors[i] = perturbAndCompute(m.SMACoeffs, i, true, false)
+	}
 }
 
 // calculateIC calculates AIC, AICc, and BIC.
 func (m *Model) calculateIC() {
 	n := len(m.residuals)
-	k := m.Order.P + m.Order.Q + m.Order.SP + m.Order.SQ + 1
+	k := m.Order.P + m.Order.Q + m.Order.SP + m.Order.SQ + 2 // +2 for intercept and variance
 
 	sse := 0.0
 	for _, r := range m.residuals {
@@ -418,10 +580,6 @@ func (m *Model) PredictWithInterval(steps int, confidence float64) (forecasts, l
 		confidence = 0.95
 	}
 
-	p := m.Order.P
-	q := m.Order.Q
-	sp := m.Order.SP
-	sq := m.Order.SQ
 	d := m.Order.D
 	sd := m.Order.SD
 	period := m.Order.M
@@ -429,76 +587,60 @@ func (m *Model) PredictWithInterval(steps int, confidence float64) (forecasts, l
 	y := m.diffData.Values
 	n := len(y)
 
-	// Extended arrays
+	// Extended arrays for recursive forecasting
 	extY := make([]float64, n+steps)
 	copy(extY, y)
 
 	extResiduals := make([]float64, n+steps)
 	copy(extResiduals, m.residuals)
 
-	// Generate forecasts
+	// Generate forecasts using multiplicative SARIMA formula
 	for h := 0; h < steps; h++ {
 		t := n + h
-		pred := m.Intercept
-
-		// Non-seasonal AR
-		for i := 0; i < p && t-i-1 >= 0; i++ {
-			pred += m.ARCoeffs[i] * (extY[t-i-1] - m.Intercept)
-		}
-
-		// Seasonal AR
-		for i := 0; i < sp; i++ {
-			lag := (i + 1) * period
-			if t-lag >= 0 {
-				pred += m.SARCoeffs[i] * (extY[t-lag] - m.Intercept)
-			}
-		}
-
-		// Non-seasonal MA (only past residuals, future = 0)
-		for i := 0; i < q && t-i-1 >= 0 && t-i-1 < n; i++ {
-			pred += m.MACoeffs[i] * extResiduals[t-i-1]
-		}
-
-		// Seasonal MA
-		for i := 0; i < sq; i++ {
-			lag := (i + 1) * period
-			if t-lag >= 0 && t-lag < n {
-				pred += m.SMACoeffs[i] * extResiduals[t-lag]
-			}
-		}
-
+		// For forecasting, future residuals are 0 (already zeroed in extResiduals)
+		pred := m.predict(t, extY, extResiduals, m.Intercept)
 		extY[t] = pred
-		extResiduals[t] = 0
 	}
 
 	forecasts = make([]float64, steps)
 	copy(forecasts, extY[n:])
 
-	// Integrate back
+	// Compute psi weights for full model (on differenced scale)
+	psi := m.computePsiWeights(steps)
+
+	// Propagate psi weights through non-seasonal integration (cumsum for each d)
+	for i := 0; i < d; i++ {
+		for j := 1; j < len(psi); j++ {
+			psi[j] += psi[j-1]
+		}
+	}
+
+	// Propagate psi weights through seasonal integration
+	for i := 0; i < sd; i++ {
+		for j := period; j < len(psi); j++ {
+			psi[j] += psi[j-period]
+		}
+	}
+
+	// Calculate prediction variance: Var(e_h) = σ² * Σ_{j=0}^{h-1} Ψ_j²
+	predVariance := make([]float64, steps)
+	cumPsiSq := 0.0
+	for h := 0; h < steps; h++ {
+		cumPsiSq += psi[h] * psi[h]
+		predVariance[h] = m.Variance * cumPsiSq
+	}
+
+	// Integrate forecasts back to original scale
 	forecasts = m.integrate(forecasts)
 
 	// Calculate prediction intervals
-	// Approximate: variance grows with horizon for integrated series
 	z := normalQuantile((1 + confidence) / 2)
 
 	lower = make([]float64, steps)
 	upper = make([]float64, steps)
 
 	for h := 0; h < steps; h++ {
-		// Base standard error from residual variance
-		se := math.Sqrt(m.Variance)
-
-		// Variance grows with horizon for integrated/seasonal-integrated series
-		growthFactor := 1.0
-		if d > 0 {
-			growthFactor *= math.Sqrt(float64(h + 1))
-		}
-		if sd > 0 && period > 0 {
-			seasonalCycles := float64(h/period + 1)
-			growthFactor *= math.Sqrt(seasonalCycles)
-		}
-
-		se *= growthFactor
+		se := math.Sqrt(predVariance[h])
 		lower[h] = forecasts[h] - z*se
 		upper[h] = forecasts[h] + z*se
 	}
@@ -506,20 +648,67 @@ func (m *Model) PredictWithInterval(steps int, confidence float64) (forecasts, l
 	return forecasts, lower, upper, nil
 }
 
-// normalQuantile returns the z-value for a given probability.
+// computePsiWeights computes the MA(∞) psi weights for the full SARIMA model.
+// Uses the multiplicative expansion of AR and MA polynomials.
+// Returns psi[0..steps] where psi[0] = 1 (ψ_0).
+func (m *Model) computePsiWeights(steps int) []float64 {
+	p := m.Order.P
+	q := m.Order.Q
+	sp := m.Order.SP
+	sq := m.Order.SQ
+	period := m.Order.M
+
+	// Compute max lag of expanded polynomials
+	maxARLag := p + sp*period
+	maxMALag := q + sq*period
+
+	// Expanded AR coefficients: a_k where Π(B) = 1 - Σ a_k·B^k
+	// (a_k > 0 means positive contribution to prediction)
+	ar := make([]float64, maxARLag+1)
+	for i := 0; i < p; i++ {
+		ar[i+1] += m.ARCoeffs[i]
+	}
+	for j := 0; j < sp; j++ {
+		ar[(j+1)*period] += m.SARCoeffs[j]
+	}
+	for i := 0; i < p; i++ {
+		for j := 0; j < sp; j++ {
+			ar[(i+1)+(j+1)*period] -= m.ARCoeffs[i] * m.SARCoeffs[j]
+		}
+	}
+
+	// Expanded MA coefficients: b_k where Θ(B) = 1 + Σ b_k·B^k
+	ma := make([]float64, maxMALag+1)
+	for i := 0; i < q; i++ {
+		ma[i+1] += m.MACoeffs[i]
+	}
+	for j := 0; j < sq; j++ {
+		ma[(j+1)*period] += m.SMACoeffs[j]
+	}
+	for i := 0; i < q; i++ {
+		for j := 0; j < sq; j++ {
+			ma[(i+1)+(j+1)*period] += m.MACoeffs[i] * m.SMACoeffs[j]
+		}
+	}
+
+	// Recursive computation: ψ_0 = 1, ψ_j = b_j + Σ_{k=1}^{j} a_k·ψ_{j-k}
+	psi := make([]float64, steps)
+	psi[0] = 1.0
+	for j := 1; j < steps; j++ {
+		if j < len(ma) {
+			psi[j] = ma[j]
+		}
+		for k := 1; k < len(ar) && k <= j; k++ {
+			psi[j] += ar[k] * psi[j-k]
+		}
+	}
+
+	return psi
+}
+
+// normalQuantile wraps stats.NormalQuantile.
 func normalQuantile(p float64) float64 {
-	if p <= 0 || p >= 1 {
-		return 0
-	}
-	if p < 0.5 {
-		return -normalQuantile(1 - p)
-	}
-
-	t := math.Sqrt(-2 * math.Log(1-p))
-	c0, c1, c2 := 2.515517, 0.802853, 0.010328
-	d1, d2, d3 := 1.432788, 0.189269, 0.001308
-
-	return t - (c0+c1*t+c2*t*t)/(1+d1*t+d2*t*t+d3*t*t*t)
+	return stats.NormalQuantile(p)
 }
 
 // integrate undoes differencing to return forecasts on original scale.
@@ -530,52 +719,64 @@ func (m *Model) integrate(forecasts []float64) []float64 {
 	sd := m.Order.SD
 	period := m.Order.M
 	original := m.data.Values
-	n := len(original)
 
 	result := make([]float64, len(forecasts))
 	copy(result, forecasts)
 
-	// Compute the non-seasonally differenced series (needed for seasonal integration)
-	nonSeasonalDiff := original
-	for i := 0; i < d; i++ {
-		if len(nonSeasonalDiff) <= 1 {
+	// Compute intermediate non-seasonally differenced series
+	// nsLevels[0] = original, nsLevels[i] = i-th non-seasonal diff
+	nsLevels := make([][]float64, d+1)
+	nsLevels[0] = original
+	for i := 1; i <= d; i++ {
+		prev := nsLevels[i-1]
+		if len(prev) <= 1 {
 			break
 		}
-		newDiff := make([]float64, len(nonSeasonalDiff)-1)
-		for j := 1; j < len(nonSeasonalDiff); j++ {
-			newDiff[j-1] = nonSeasonalDiff[j] - nonSeasonalDiff[j-1]
+		diff := make([]float64, len(prev)-1)
+		for j := 0; j < len(diff); j++ {
+			diff[j] = prev[j+1] - prev[j]
 		}
-		nonSeasonalDiff = newDiff
+		nsLevels[i] = diff
 	}
 
-	// Step 1: Undo seasonal differencing
-	// Seasonal diff: z_t = y_t - y_{t-m}, so y_t = z_t + y_{t-m}
-	// We need the last 'period' values from the non-seasonally differenced series
-	if sd > 0 && period > 0 {
-		nDiff := len(nonSeasonalDiff)
-		for i := 0; i < sd; i++ {
-			for j := 0; j < len(result); j++ {
-				if j < period {
-					// Use non-seasonally differenced original data
-					idx := nDiff - period + j
-					if idx >= 0 && idx < nDiff {
-						result[j] += nonSeasonalDiff[idx]
-					}
-				} else {
-					// Use earlier integrated forecast
-					result[j] += result[j-period]
+	// The fully non-seasonally-differenced series
+	nsDiffed := nsLevels[d]
+
+	// Compute intermediate seasonally-differenced series
+	// sLevels[0] = nsDiffed, sLevels[i] = i-th seasonal diff of nsDiffed
+	sLevels := make([][]float64, sd+1)
+	sLevels[0] = nsDiffed
+	for i := 1; i <= sd; i++ {
+		prev := sLevels[i-1]
+		if len(prev) <= period {
+			break
+		}
+		sdiff := make([]float64, len(prev)-period)
+		for j := period; j < len(prev); j++ {
+			sdiff[j-period] = prev[j] - prev[j-period]
+		}
+		sLevels[i] = sdiff
+	}
+
+	// Step 1: Undo seasonal differencing (innermost to outermost)
+	for i := sd - 1; i >= 0; i-- {
+		refSeries := sLevels[i]
+		nRef := len(refSeries)
+		for j := 0; j < len(result); j++ {
+			if j < period {
+				idx := nRef - period + j
+				if idx >= 0 && idx < nRef {
+					result[j] += refSeries[idx]
 				}
+			} else {
+				result[j] += result[j-period]
 			}
 		}
 	}
 
-	// Step 2: Undo non-seasonal differencing
-	// Non-seasonal diff: y'_t = y_t - y_{t-1}, so y_t = y'_t + y_{t-1}
-	// We need to cumsum starting from the last value of original
-	for i := 0; i < d; i++ {
-		lastVal := original[n-1]
-		// For multiple diffs, we need the last value at each integration level
-		// Both cases use the same logic: cumsum starting from lastVal
+	// Step 2: Undo non-seasonal differencing (innermost to outermost)
+	for i := d - 1; i >= 0; i-- {
+		lastVal := nsLevels[i][len(nsLevels[i])-1]
 		for j := 0; j < len(result); j++ {
 			if j == 0 {
 				result[j] += lastVal

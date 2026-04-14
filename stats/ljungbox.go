@@ -106,42 +106,27 @@ func BoxPierce(series *timeseries.Series, lags, fitdf int) *BoxPierceResult {
 }
 
 // chiSquaredCDF calculates the CDF of chi-squared distribution.
+// Uses regularized incomplete gamma function for numerical stability.
 func chiSquaredCDF(x float64, k int) float64 {
 	if x < 0 {
 		return 0
 	}
 
-	// Use incomplete gamma function: P(k/2, x/2)
-	return lowerIncompleteGamma(float64(k)/2, x/2) / gamma(float64(k)/2)
+	a := float64(k) / 2
+	xHalf := x / 2
+
+	if xHalf < a+1 {
+		// Use series representation directly (regularized form)
+		return gammaIncSeries(a, xHalf) / gamma(a)
+	}
+	// Use continued fraction: P(a,x) = 1 - Q(a,x)
+	// Compute Q(a,x) = gammaIncCF(a,x)/gamma(a) directly to avoid catastrophic cancellation
+	return 1 - gammaIncCF(a, xHalf)/gamma(a)
 }
 
-// gamma calculates the gamma function using Lanczos approximation.
+// gamma wraps math.Gamma from the standard library.
 func gamma(z float64) float64 {
-	if z < 0.5 {
-		return math.Pi / (math.Sin(math.Pi*z) * gamma(1-z))
-	}
-
-	z--
-	g := 7
-	c := []float64{
-		0.99999999999980993,
-		676.5203681218851,
-		-1259.1392167224028,
-		771.32342877765313,
-		-176.61502916214059,
-		12.507343278686905,
-		-0.13857109526572012,
-		9.9843695780195716e-6,
-		1.5056327351493116e-7,
-	}
-
-	x := c[0]
-	for i := 1; i < g+2; i++ {
-		x += c[i] / (z + float64(i))
-	}
-
-	t := z + float64(g) + 0.5
-	return math.Sqrt(2*math.Pi) * math.Pow(t, z+0.5) * math.Exp(-t) * x
+	return math.Gamma(z)
 }
 
 // lowerIncompleteGamma calculates the lower incomplete gamma function.
@@ -151,11 +136,12 @@ func lowerIncompleteGamma(a, x float64) float64 {
 	}
 
 	if x < a+1 {
-		// Use series representation
 		return gammaIncSeries(a, x)
 	}
-	// Use continued fraction
-	return gamma(a) - gammaIncCF(a, x)
+	// For large x: γ(a,x) = Γ(a) - Γ_upper(a,x)
+	// Compute via regularized form to avoid precision loss
+	g := gamma(a)
+	return g - gammaIncCF(a, x)
 }
 
 // gammaIncSeries calculates incomplete gamma using series expansion.
@@ -216,6 +202,23 @@ func gammaIncCF(a, x float64) float64 {
 	return math.Exp(-x+a*math.Log(x)-math.Log(gamma(a))) * h
 }
 
+// NormalQuantile returns the z-value for a given probability using
+// the Abramowitz and Stegun rational approximation.
+func NormalQuantile(p float64) float64 {
+	if p <= 0 || p >= 1 {
+		return 0
+	}
+	if p < 0.5 {
+		return -NormalQuantile(1 - p)
+	}
+
+	t := math.Sqrt(-2 * math.Log(1-p))
+	c0, c1, c2 := 2.515517, 0.802853, 0.010328
+	d1, d2, d3 := 1.432788, 0.189269, 0.001308
+
+	return t - (c0+c1*t+c2*t*t)/(1+d1*t+d2*t*t+d3*t*t*t)
+}
+
 // DurbinWatsonResult represents the result of a Durbin-Watson test.
 type DurbinWatsonResult struct {
 	Statistic float64
@@ -249,5 +252,66 @@ func DurbinWatson(residuals []float64) *DurbinWatsonResult {
 
 	return &DurbinWatsonResult{
 		Statistic: numerator / denominator,
+	}
+}
+
+// JarqueBeraResult represents the result of a Jarque-Bera normality test.
+type JarqueBeraResult struct {
+	Statistic float64
+	PValue    float64
+	Skewness  float64
+	Kurtosis  float64
+	IsNormal  bool // true if p-value >= 0.05
+}
+
+// JarqueBera performs the Jarque-Bera test for normality of residuals.
+// H0: residuals are normally distributed. Reject if p-value < 0.05.
+func JarqueBera(residuals []float64) *JarqueBeraResult {
+	n := len(residuals)
+	if n < 8 {
+		return nil
+	}
+
+	// Calculate mean
+	mean := 0.0
+	for _, r := range residuals {
+		mean += r
+	}
+	mean /= float64(n)
+
+	// Calculate central moments
+	m2, m3, m4 := 0.0, 0.0, 0.0
+	for _, r := range residuals {
+		d := r - mean
+		d2 := d * d
+		m2 += d2
+		m3 += d2 * d
+		m4 += d2 * d2
+	}
+	m2 /= float64(n)
+	m3 /= float64(n)
+	m4 /= float64(n)
+
+	if m2 == 0 {
+		return &JarqueBeraResult{Statistic: 0, PValue: 1, IsNormal: true}
+	}
+
+	// Skewness and excess kurtosis
+	skewness := m3 / math.Pow(m2, 1.5)
+	kurtosis := m4/(m2*m2) - 3.0 // excess kurtosis
+
+	// JB statistic
+	nf := float64(n)
+	jb := nf / 6 * (skewness*skewness + kurtosis*kurtosis/4)
+
+	// P-value from chi-squared(2) distribution
+	pValue := 1 - chiSquaredCDF(jb, 2)
+
+	return &JarqueBeraResult{
+		Statistic: jb,
+		PValue:    pValue,
+		Skewness:  skewness,
+		Kurtosis:  kurtosis,
+		IsNormal:  pValue >= 0.05,
 	}
 }

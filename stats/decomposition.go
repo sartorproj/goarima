@@ -2,6 +2,7 @@ package stats
 
 import (
 	"math"
+	"sort"
 
 	"github.com/sartorproj/goarima/timeseries"
 )
@@ -21,7 +22,7 @@ type DecompositionResult struct {
 // Type can be "additive" (Y = T + S + R) or "multiplicative" (Y = T * S * R).
 func Decompose(series *timeseries.Series, period int, decompositionType string) *DecompositionResult {
 	n := series.Len()
-	if n < 2*period {
+	if period < 2 || n < 2*period+1 {
 		return nil
 	}
 
@@ -72,13 +73,33 @@ func Decompose(series *timeseries.Series, period int, decompositionType string) 
 
 	// Normalize seasonal component
 	if decompositionType == "multiplicative" {
-		sum := 0.0
+		// Multiplicative factors should have geometric mean of 1
+		logSum := 0.0
+		allPositive := true
 		for _, v := range seasonalPattern {
-			sum += v
+			if v <= 0 {
+				allPositive = false
+				break
+			}
+			logSum += math.Log(v)
 		}
-		mean := sum / float64(period)
-		for i := range seasonalPattern {
-			seasonalPattern[i] /= mean
+		if allPositive {
+			geoMean := math.Exp(logSum / float64(period))
+			for i := range seasonalPattern {
+				seasonalPattern[i] /= geoMean
+			}
+		} else {
+			// Fallback to arithmetic normalization if any factor is non-positive
+			sum := 0.0
+			for _, v := range seasonalPattern {
+				sum += v
+			}
+			mean := sum / float64(period)
+			if mean != 0 {
+				for i := range seasonalPattern {
+					seasonalPattern[i] /= mean
+				}
+			}
 		}
 	} else {
 		sum := 0.0
@@ -190,8 +211,10 @@ type STLResult struct {
 	Period   int
 }
 
-// STL performs Seasonal and Trend decomposition using Loess.
-// This is a simplified implementation of the STL algorithm.
+// STL performs Seasonal and Trend decomposition using weighted moving averages.
+// This is a simplified approximation of the STL algorithm — it uses weighted
+// moving averages for smoothing instead of true LOESS regression. Results
+// will differ from R's stl() or Python's statsmodels.STL.
 func STL(series *timeseries.Series, period, robustIters int) *STLResult {
 	n := series.Len()
 	if n < 2*period {
@@ -334,17 +357,7 @@ func median(data []float64) float64 {
 
 	sorted := make([]float64, n)
 	copy(sorted, data)
-
-	// Simple insertion sort for small arrays
-	for i := 1; i < n; i++ {
-		key := sorted[i]
-		j := i - 1
-		for j >= 0 && sorted[j] > key {
-			sorted[j+1] = sorted[j]
-			j--
-		}
-		sorted[j+1] = key
-	}
+	sort.Float64s(sorted)
 
 	if n%2 == 0 {
 		return (sorted[n/2-1] + sorted[n/2]) / 2

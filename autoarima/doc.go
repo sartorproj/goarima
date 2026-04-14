@@ -22,11 +22,11 @@
 //
 // # Seasonal Model Selection
 //
-// For seasonal data, enable seasonality in the configuration:
+// Seasonal detection is automatic by default:
 //
 //	config := autoarima.DefaultConfig()
-//	config.Seasonal = true
-//	config.SeasonalM = 12  // Monthly data with yearly seasonality
+//	config.AutoSeasonal = true           // Enabled by default
+//	config.SeasonalPeriods = []int{12}   // Periods to check
 //
 //	result, _ := autoarima.AutoARIMA(series, config)
 //	fmt.Printf("Best model: SARIMA(%d,%d,%d)(%d,%d,%d)[%d]\n",
@@ -38,17 +38,16 @@
 // Customize the search with Config:
 //
 //	config := &autoarima.Config{
-//	    MaxP:        3,        // Maximum AR order
-//	    MaxD:        2,        // Maximum differencing order
-//	    MaxQ:        3,        // Maximum MA order
-//	    MaxSP:       2,        // Maximum seasonal AR order
-//	    MaxSD:       1,        // Maximum seasonal differencing
-//	    MaxSQ:       2,        // Maximum seasonal MA order
-//	    Seasonal:    true,     // Enable seasonal search
-//	    SeasonalM:   12,       // Seasonal period
-//	    Criterion:   "aicc",   // "aic", "aicc", or "bic"
-//	    Stepwise:    true,     // Use stepwise search
-//	    StationTest: "kpss",   // "adf" or "kpss"
+//	    MaxP:         3,        // Maximum AR order
+//	    MaxD:         2,        // Maximum differencing order
+//	    MaxQ:         3,        // Maximum MA order
+//	    MaxSP:        2,        // Maximum seasonal AR order
+//	    MaxSD:        1,        // Maximum seasonal differencing
+//	    MaxSQ:        2,        // Maximum seasonal MA order
+//	    AutoSeasonal: true,     // Auto-detect seasonality
+//	    Criterion:    "aicc",   // "aic", "aicc", or "bic"
+//	    Stepwise:     true,     // Use stepwise search
+//	    StationTest:  "kpss",   // "adf" or "kpss"
 //	}
 //
 // # Search Methods

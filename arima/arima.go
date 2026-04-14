@@ -4,6 +4,7 @@ package arima
 import (
 	"errors"
 	"math"
+	"strconv"
 
 	"github.com/sartorproj/goarima/stats"
 	"github.com/sartorproj/goarima/timeseries"
@@ -16,7 +17,8 @@ type Order struct {
 	Q int // MA order (number of moving average terms)
 }
 
-// Model represents an ARIMA model.
+// Model represents an ARIMA(p,d,q) model fitted via Conditional Sum of Squares.
+// Use New() to create and Fit() to estimate parameters from data.
 type Model struct {
 	Order      Order
 	ARCoeffs   []float64 // AR coefficients (phi)
@@ -39,7 +41,11 @@ type Model struct {
 }
 
 // New creates a new ARIMA model with the specified order.
+// Returns nil if any order is negative.
 func New(p, d, q int) *Model {
+	if p < 0 || d < 0 || q < 0 {
+		return nil
+	}
 	return &Model{
 		Order:    Order{P: p, D: d, Q: q},
 		ARCoeffs: make([]float64, p),
@@ -51,6 +57,13 @@ func New(p, d, q int) *Model {
 func (m *Model) Fit(series *timeseries.Series) error {
 	if series.Len() < m.Order.P+m.Order.Q+m.Order.D+10 {
 		return errors.New("insufficient data points for the specified order")
+	}
+
+	// Validate input for NaN/Inf
+	for i, v := range series.Values {
+		if math.IsNaN(v) || math.IsInf(v, 0) {
+			return errors.New("input series contains NaN or Inf at index " + strconv.Itoa(i))
+		}
 	}
 
 	m.data = series
@@ -161,9 +174,16 @@ func (m *Model) optimizeCSS(y []float64) error {
 	bestMACoeffs := make([]float64, q)
 	noImproveCount := 0
 
+	// Pre-allocate working arrays to avoid allocation in hot loop
+	residuals := make([]float64, n)
+	arGrad := make([]float64, p)
+	maGrad := make([]float64, q)
+
 	for iter := 0; iter < maxIter; iter++ {
-		// Calculate residuals
-		residuals := make([]float64, n)
+		// Zero residuals
+		for i := range residuals {
+			residuals[i] = 0
+		}
 		currentSSE := 0.0
 
 		for t := startIdx; t < n; t++ {
@@ -198,9 +218,13 @@ func (m *Model) optimizeCSS(y []float64) error {
 			break
 		}
 
-		// Calculate gradients
-		arGrad := make([]float64, p)
-		maGrad := make([]float64, q)
+		// Zero gradients
+		for i := range arGrad {
+			arGrad[i] = 0
+		}
+		for i := range maGrad {
+			maGrad[i] = 0
+		}
 
 		for t := startIdx; t < n; t++ {
 			// Gradient for AR coefficients
@@ -218,22 +242,24 @@ func (m *Model) optimizeCSS(y []float64) error {
 		for i := 0; i < p; i++ {
 			arMomentum[i] = momentum*arMomentum[i] + learningRate*arGrad[i]/float64(n)
 			m.ARCoeffs[i] -= arMomentum[i]
-			// Constrain for stationarity
 			m.ARCoeffs[i] = math.Max(-0.99, math.Min(0.99, m.ARCoeffs[i]))
 		}
+		// Enforce stationarity: sum of |AR coefficients| < 1
+		constrainPolynomial(m.ARCoeffs)
 
 		for i := 0; i < q; i++ {
 			maMomentum[i] = momentum*maMomentum[i] + learningRate*maGrad[i]/float64(n)
 			m.MACoeffs[i] -= maMomentum[i]
-			// Constrain for invertibility
 			m.MACoeffs[i] = math.Max(-0.99, math.Min(0.99, m.MACoeffs[i]))
 		}
+		// Enforce invertibility: sum of |MA coefficients| < 1
+		constrainPolynomial(m.MACoeffs)
 
 		// Decay learning rate
 		learningRate *= decay
 
-		// Convergence check
-		if iter > 0 && math.Abs(currentSSE-bestSSE) < tolerance {
+		// Convergence check (relative tolerance)
+		if iter > 0 && bestSSE > 0 && math.Abs(currentSSE-bestSSE)/bestSSE < tolerance {
 			break
 		}
 	}
@@ -340,7 +366,8 @@ func (m *Model) estimateStdErrors(y []float64) {
 		// Second derivative approximation: d²SSE/dθ² ≈ (f(θ+ε) - 2f(θ) + f(θ-ε)) / ε²
 		hessianDiag := (ssePlus - 2*baseSSE + sseMinus) / (eps * eps)
 		if hessianDiag > 0 {
-			// SE = sqrt(2 * σ² / H_ii)
+			// SE = sqrt(σ² / (H_ii/2)) = sqrt(2 * σ² / H_ii)
+			// The Hessian of SSE = 2 * n * Hessian of σ², so SE = sqrt(2 * σ² / H_ii)
 			m.ARStdErrors[i] = math.Sqrt(2 * m.Variance / hessianDiag)
 		}
 	}
@@ -367,7 +394,7 @@ func (m *Model) estimateStdErrors(y []float64) {
 // calculateIC calculates AIC, AICc, and BIC.
 func (m *Model) calculateIC() {
 	n := len(m.residuals)
-	k := m.Order.P + m.Order.Q + 1 // number of parameters (AR + MA + intercept)
+	k := m.Order.P + m.Order.Q + 2 // number of parameters (AR + MA + intercept + variance)
 
 	// Log-likelihood (assuming Gaussian errors)
 	sse := 0.0
@@ -432,7 +459,7 @@ func (m *Model) PredictWithInterval(steps int, confidence float64) (forecasts, l
 	copy(extResiduals, m.residuals)
 
 	// Compute psi weights (MA representation coefficients) for variance calculation
-	psiWeights := m.computePsiWeights(steps)
+	diffPsiWeights := m.computePsiWeights(steps)
 
 	// Generate forecasts for differenced series
 	for h := 0; h < steps; h++ {
@@ -457,15 +484,28 @@ func (m *Model) PredictWithInterval(steps int, confidence float64) (forecasts, l
 	forecasts = make([]float64, steps)
 	copy(forecasts, extY[n:])
 
-	// Calculate prediction variance for each horizon
-	// Var(e_{n+h}) = σ² * (1 + ψ₁² + ψ₂² + ... + ψ_{h-1}²)
+	// Build full psi weights including ψ_0 = 1 for original-scale variance
+	fullPsi := make([]float64, steps)
+	fullPsi[0] = 1.0
+	for j := 1; j < steps; j++ {
+		if j-1 < len(diffPsiWeights) {
+			fullPsi[j] = diffPsiWeights[j-1]
+		}
+	}
+
+	// Propagate psi weights through integration (cumsum for each order of differencing)
+	for i := 0; i < d; i++ {
+		for j := 1; j < steps; j++ {
+			fullPsi[j] += fullPsi[j-1]
+		}
+	}
+
+	// Calculate prediction variance: Var(e_h) = σ² * Σ_{j=0}^{h-1} Ψ_j²
 	predVariance := make([]float64, steps)
 	cumPsiSq := 0.0
 	for h := 0; h < steps; h++ {
-		if h > 0 && h-1 < len(psiWeights) {
-			cumPsiSq += psiWeights[h-1] * psiWeights[h-1]
-		}
-		predVariance[h] = m.Variance * (1 + cumPsiSq)
+		cumPsiSq += fullPsi[h] * fullPsi[h]
+		predVariance[h] = m.Variance * cumPsiSq
 	}
 
 	// Integrate forecasts back to original scale
@@ -474,17 +514,12 @@ func (m *Model) PredictWithInterval(steps int, confidence float64) (forecasts, l
 	}
 
 	// Calculate prediction intervals
-	// z-value for confidence level (approximate)
 	z := normalQuantile((1 + confidence) / 2)
 
 	lower = make([]float64, steps)
 	upper = make([]float64, steps)
 	for h := 0; h < steps; h++ {
 		se := math.Sqrt(predVariance[h])
-		// For integrated series, variance grows with horizon
-		if d > 0 {
-			se *= math.Sqrt(float64(h + 1))
-		}
 		lower[h] = forecasts[h] - z*se
 		upper[h] = forecasts[h] + z*se
 	}
@@ -518,25 +553,9 @@ func (m *Model) computePsiWeights(maxLag int) []float64 {
 	return psi
 }
 
-// normalQuantile returns the z-value for a given probability using approximation.
+// normalQuantile wraps stats.NormalQuantile.
 func normalQuantile(p float64) float64 {
-	// Rational approximation for the normal quantile function
-	// Abramowitz and Stegun approximation
-	if p <= 0 || p >= 1 {
-		return 0
-	}
-
-	if p < 0.5 {
-		return -normalQuantile(1 - p)
-	}
-
-	t := math.Sqrt(-2 * math.Log(1-p))
-
-	// Coefficients for approximation
-	c0, c1, c2 := 2.515517, 0.802853, 0.010328
-	d1, d2, d3 := 1.432788, 0.189269, 0.001308
-
-	return t - (c0+c1*t+c2*t*t)/(1+d1*t+d2*t*t+d3*t*t*t)
+	return stats.NormalQuantile(p)
 }
 
 // integrate undoes differencing to return forecasts on original scale.
@@ -547,10 +566,29 @@ func (m *Model) integrate(forecasts []float64) []float64 {
 	result := make([]float64, len(forecasts))
 	copy(result, forecasts)
 
-	// We need to integrate d times
-	for i := 0; i < d; i++ {
-		// The last value before differencing
-		lastVal := original[len(original)-1-i]
+	if d == 0 {
+		return result
+	}
+
+	// Compute intermediate differenced series
+	// levels[0] = original, levels[i] = i-th order differences
+	levels := make([][]float64, d)
+	levels[0] = original
+	for i := 1; i < d; i++ {
+		prev := levels[i-1]
+		diff := make([]float64, len(prev)-1)
+		for j := 0; j < len(diff); j++ {
+			diff[j] = prev[j+1] - prev[j]
+		}
+		levels[i] = diff
+	}
+
+	// Integrate d times: undo from innermost diff to outermost
+	// i = d-1: undo the d-th diff using last value of (d-1)-th diff series
+	// ...
+	// i = 0: undo the 1st diff using last value of original series
+	for i := d - 1; i >= 0; i-- {
+		lastVal := levels[i][len(levels[i])-1]
 		for j := 0; j < len(result); j++ {
 			if j == 0 {
 				result[j] += lastVal
@@ -683,4 +721,20 @@ func yuleWalker(acf []float64, order int) []float64 {
 	}
 
 	return phi
+}
+
+// constrainPolynomial enforces that sum of absolute coefficients < 1.
+// This is a necessary (not sufficient) condition for stationarity/invertibility.
+// If violated, coefficients are scaled down proportionally.
+func constrainPolynomial(coeffs []float64) {
+	absSum := 0.0
+	for _, c := range coeffs {
+		absSum += math.Abs(c)
+	}
+	if absSum >= 0.99 {
+		scale := 0.98 / absSum
+		for i := range coeffs {
+			coeffs[i] *= scale
+		}
+	}
 }

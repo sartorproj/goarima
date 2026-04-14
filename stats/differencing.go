@@ -94,14 +94,14 @@ func seasonalStrength(series *timeseries.Series, period int) float64 {
 		return 0
 	}
 
-	// Calculate variance of residuals
+	// Calculate variance of residuals (variance() already handles NaN)
 	varR := variance(decomp.Residual.Values)
 
-	// Calculate variance of seasonal + residual
-	seasonalPlusResid := make([]float64, len(decomp.Seasonal.Values))
-	for i := range seasonalPlusResid {
+	// Calculate variance of seasonal + residual, excluding NaN positions
+	var seasonalPlusResid []float64
+	for i := range decomp.Seasonal.Values {
 		if !math.IsNaN(decomp.Seasonal.Values[i]) && !math.IsNaN(decomp.Residual.Values[i]) {
-			seasonalPlusResid[i] = decomp.Seasonal.Values[i] + decomp.Residual.Values[i]
+			seasonalPlusResid = append(seasonalPlusResid, decomp.Seasonal.Values[i]+decomp.Residual.Values[i])
 		}
 	}
 	varSR := variance(seasonalPlusResid)

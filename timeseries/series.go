@@ -44,30 +44,47 @@ func (s *Series) Len() int {
 	return len(s.Values)
 }
 
-// Mean calculates the arithmetic mean of the series.
+// Mean calculates the arithmetic mean of the series, skipping NaN values.
 func (s *Series) Mean() float64 {
 	if len(s.Values) == 0 {
 		return 0
 	}
 	sum := 0.0
+	count := 0
 	for _, v := range s.Values {
-		sum += v
+		if !math.IsNaN(v) {
+			sum += v
+			count++
+		}
 	}
-	return sum / float64(len(s.Values))
+	if count == 0 {
+		return math.NaN()
+	}
+	return sum / float64(count)
 }
 
-// Variance calculates the variance of the series.
+// Variance calculates the variance of the series, skipping NaN values.
 func (s *Series) Variance() float64 {
 	if len(s.Values) < 2 {
 		return 0
 	}
 	mean := s.Mean()
-	sumSq := 0.0
-	for _, v := range s.Values {
-		diff := v - mean
-		sumSq += diff * diff
+	if math.IsNaN(mean) {
+		return math.NaN()
 	}
-	return sumSq / float64(len(s.Values)-1)
+	sumSq := 0.0
+	count := 0
+	for _, v := range s.Values {
+		if !math.IsNaN(v) {
+			diff := v - mean
+			sumSq += diff * diff
+			count++
+		}
+	}
+	if count < 2 {
+		return 0
+	}
+	return sumSq / float64(count-1)
 }
 
 // Std calculates the standard deviation of the series.
@@ -75,28 +92,34 @@ func (s *Series) Std() float64 {
 	return math.Sqrt(s.Variance())
 }
 
-// Min returns the minimum value in the series.
+// Min returns the minimum value in the series, skipping NaN values.
 func (s *Series) Min() float64 {
 	if len(s.Values) == 0 {
 		return math.NaN()
 	}
-	minVal := s.Values[0]
-	for _, v := range s.Values[1:] {
-		if v < minVal {
+	minVal := math.NaN()
+	for _, v := range s.Values {
+		if math.IsNaN(v) {
+			continue
+		}
+		if math.IsNaN(minVal) || v < minVal {
 			minVal = v
 		}
 	}
 	return minVal
 }
 
-// Max returns the maximum value in the series.
+// Max returns the maximum value in the series, skipping NaN values.
 func (s *Series) Max() float64 {
 	if len(s.Values) == 0 {
 		return math.NaN()
 	}
-	maxVal := s.Values[0]
-	for _, v := range s.Values[1:] {
-		if v > maxVal {
+	maxVal := math.NaN()
+	for _, v := range s.Values {
+		if math.IsNaN(v) {
+			continue
+		}
+		if math.IsNaN(maxVal) || v > maxVal {
 			maxVal = v
 		}
 	}
@@ -119,25 +142,41 @@ func (s *Series) Median() float64 {
 	return sorted[n/2]
 }
 
-// Diff calculates the first difference of the series (d=1).
+// Diff calculates the first difference of the series: y[t] - y[t-1].
 func (s *Series) Diff() *Series {
-	return s.DiffN(1)
+	return s.DiffLag(1)
 }
 
-// DiffN calculates the n-th order difference of the series.
+// DiffN calculates the n-th order difference by applying Diff() n times.
+// For example, DiffN(2) computes (y[t]-y[t-1]) - (y[t-1]-y[t-2]), NOT y[t]-y[t-2].
 func (s *Series) DiffN(n int) *Series {
-	if n <= 0 || len(s.Values) <= n {
+	if n <= 0 {
+		return s.Copy()
+	}
+	result := s
+	for i := 0; i < n; i++ {
+		result = result.Diff()
+		if result.Len() == 0 {
+			return result
+		}
+	}
+	return result
+}
+
+// DiffLag calculates the lag-k difference: y[t] - y[t-k].
+func (s *Series) DiffLag(k int) *Series {
+	if k <= 0 || len(s.Values) <= k {
 		return &Series{Values: []float64{}}
 	}
 
-	result := make([]float64, len(s.Values)-n)
-	for i := n; i < len(s.Values); i++ {
-		result[i-n] = s.Values[i] - s.Values[i-n]
+	result := make([]float64, len(s.Values)-k)
+	for i := k; i < len(s.Values); i++ {
+		result[i-k] = s.Values[i] - s.Values[i-k]
 	}
 
 	timestamps := make([]time.Time, len(result))
-	if len(s.Timestamps) > n {
-		copy(timestamps, s.Timestamps[n:])
+	if len(s.Timestamps) > k {
+		copy(timestamps, s.Timestamps[k:])
 	}
 
 	return &Series{
@@ -282,6 +321,54 @@ func (s *Series) MovingAverage(window int) *Series {
 		Timestamps: timestamps,
 		Values:     result,
 		Name:       s.Name + "_ma",
+	}
+}
+
+// InverseDiff reverses first-order differencing given the initial value.
+// If y was differenced to produce z (z = diff(y)), then InverseDiff(z, y[0]) reconstructs y.
+func (s *Series) InverseDiff(initialValue float64) *Series {
+	result := make([]float64, len(s.Values)+1)
+	result[0] = initialValue
+	for i, v := range s.Values {
+		result[i+1] = result[i] + v
+	}
+
+	timestamps := make([]time.Time, len(result))
+	base := time.Now()
+	for i := range timestamps {
+		timestamps[i] = base.Add(time.Duration(i) * time.Hour)
+	}
+
+	return &Series{
+		Timestamps: timestamps,
+		Values:     result,
+		Name:       s.Name + "_integrated",
+	}
+}
+
+// InverseSeasonalDiff reverses seasonal differencing given the initial values.
+// initialValues must have length m (the seasonal period).
+func (s *Series) InverseSeasonalDiff(m int, initialValues []float64) *Series {
+	if m <= 0 || len(initialValues) < m {
+		return &Series{Values: []float64{}}
+	}
+
+	result := make([]float64, len(s.Values)+m)
+	copy(result, initialValues[:m])
+	for i, v := range s.Values {
+		result[i+m] = v + result[i]
+	}
+
+	timestamps := make([]time.Time, len(result))
+	base := time.Now()
+	for i := range timestamps {
+		timestamps[i] = base.Add(time.Duration(i) * time.Hour)
+	}
+
+	return &Series{
+		Timestamps: timestamps,
+		Values:     result,
+		Name:       s.Name + "_seasonal_integrated",
 	}
 }
 

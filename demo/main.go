@@ -104,8 +104,11 @@ func main() {
 	fmt.Printf("\n%s\nEXPORTING RESULTS\n%s\n", strings.Repeat("=", 80), strings.Repeat("=", 80))
 
 	if data, err := json.MarshalIndent(output, "", "  "); err == nil {
-		os.WriteFile("forecast_results.json", data, 0644)
-		fmt.Printf("Exported %d datasets to forecast_results.json\n", len(output.Datasets))
+		if writeErr := os.WriteFile("forecast_results.json", data, 0644); writeErr != nil {
+			fmt.Printf("Warning: failed to write results: %v\n", writeErr)
+		} else {
+			fmt.Printf("Exported %d datasets to forecast_results.json\n", len(output.Datasets))
+		}
 	}
 
 	fmt.Println("\nTo visualize: python visualize.py")

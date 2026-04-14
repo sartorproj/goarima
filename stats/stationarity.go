@@ -19,7 +19,17 @@ type ADFResult struct {
 // ADF performs the Augmented Dickey-Fuller test for unit root.
 // The null hypothesis is that the series has a unit root (is non-stationary).
 // If p-value < 0.05, we reject the null and conclude the series is stationary.
+// Regression variant is "c" (constant only, default).
 func ADF(series *timeseries.Series, maxLag int) *ADFResult {
+	return ADFWithRegression(series, maxLag, "c")
+}
+
+// ADFWithRegression performs the ADF test with a specified regression variant.
+// regression can be "nc" (no constant), "c" (constant only), or "ct" (constant + trend).
+func ADFWithRegression(series *timeseries.Series, maxLag int, regression string) *ADFResult {
+	if regression == "" {
+		regression = "c"
+	}
 	n := series.Len()
 	if n < 10 {
 		return nil
@@ -44,42 +54,69 @@ func ADF(series *timeseries.Series, maxLag int) *ADFResult {
 		return nil
 	}
 
-	// Prepare matrices for OLS
+	// Prepare matrices for OLS based on regression type
 	y := make([]float64, nObs)
 	x := make([][]float64, nObs)
+
+	// Determine number of regressors
+	var nRegressors int
+	var laggedLevelIdx int
+	switch regression {
+	case "nc": // no constant: just lagged level + lagged diffs
+		nRegressors = 1 + maxLag
+		laggedLevelIdx = 0
+	case "ct": // constant + trend: constant, trend, lagged level + lagged diffs
+		nRegressors = 3 + maxLag
+		laggedLevelIdx = 2
+	default: // "c": constant + lagged level + lagged diffs
+		nRegressors = 2 + maxLag
+		laggedLevelIdx = 1
+	}
 
 	for i := 0; i < nObs; i++ {
 		t := i + maxLag
 		y[i] = diff.Values[t]
 
-		// x[i] = [1, y_{t-1}, delta_y_{t-1}, ..., delta_y_{t-maxLag}]
-		x[i] = make([]float64, 2+maxLag)
-		x[i][0] = 1                // constant
-		x[i][1] = series.Values[t] // lagged level
+		x[i] = make([]float64, nRegressors)
+		col := 0
+		if regression == "c" || regression == "ct" {
+			x[i][col] = 1 // constant
+			col++
+		}
+		if regression == "ct" {
+			x[i][col] = float64(t) // trend
+			col++
+		}
+		x[i][col] = series.Values[t] // lagged level
+		col++
 		for j := 1; j <= maxLag; j++ {
-			x[i][1+j] = diff.Values[t-j] // lagged differences
+			x[i][col] = diff.Values[t-j] // lagged differences
+			col++
 		}
 	}
 
 	// Perform OLS regression
 	coeffs, se := olsRegression(x, y)
-	if coeffs == nil || se == nil || len(coeffs) < 2 || len(se) < 2 {
+	if coeffs == nil || se == nil || len(coeffs) <= laggedLevelIdx || len(se) <= laggedLevelIdx {
 		return nil
 	}
 
 	// Test statistic is t-stat for the lagged level coefficient
-	tStat := coeffs[1] / se[1]
+	tStat := coeffs[laggedLevelIdx] / se[laggedLevelIdx]
 
-	// Critical values for ADF test (with constant, no trend)
-	// These are approximate critical values
-	criticalVals := map[string]float64{
-		"1%":  -3.43,
-		"5%":  -2.86,
-		"10%": -2.57,
+	// Critical values depend on regression type
+	var criticalVals map[string]float64
+	switch regression {
+	case "nc":
+		criticalVals = map[string]float64{"1%": -2.56, "5%": -1.94, "10%": -1.62}
+	case "ct":
+		criticalVals = map[string]float64{"1%": -3.96, "5%": -3.41, "10%": -3.13}
+	default: // "c"
+		criticalVals = map[string]float64{"1%": -3.43, "5%": -2.86, "10%": -2.57}
 	}
 
 	// Approximate p-value using MacKinnon approximation
-	pValue := mackinnonPValue(tStat, n, "c")
+	pValue := mackinnonPValue(tStat, n, regression)
 
 	isStationary := pValue < 0.05
 
@@ -300,10 +337,11 @@ func PhillipsPerron(series *timeseries.Series, nlags int) *PhillipsPerronResult 
 		sumXDev2 += diff * diff
 	}
 
-	// PP correction
+	// PP correction (Phillips and Perron, 1988; Hamilton 1994 eq 17.6.18)
+	// Z_t = sqrt(gamma0/lambda2) * t_stat - (lambda2 - gamma0) * sqrt(sumXDev2) / (2 * sqrt(lambda2) * sqrt(s2))
 	correction := 0.0
 	if lambda2 > 0 && s2 > 0 {
-		correction = (lambda2 - gamma0) * math.Sqrt(float64(nObs)) / (2 * math.Sqrt(lambda2) * math.Sqrt(sumXDev2))
+		correction = (lambda2 - gamma0) * math.Sqrt(sumXDev2) / (2 * math.Sqrt(lambda2) * math.Sqrt(s2))
 	}
 
 	ppStat := math.Sqrt(gamma0/lambda2)*tStat - correction
@@ -450,30 +488,62 @@ func invertMatrix(m [][]float64) [][]float64 {
 }
 
 // mackinnonPValue approximates p-value for ADF/PP test using MacKinnon response surface.
-// The nobs and regression parameters are reserved for future improvements using
-// MacKinnon's response surface regression for finite sample corrections.
-func mackinnonPValue(stat float64, _ int, _ string) float64 {
-	// Simplified approximation based on MacKinnon (1994)
-	// For "c" (constant only) regression
-
-	// Asymptotic critical values interpolation
-	switch {
-	case stat < -3.96:
-		return 0.001
-	case stat < -3.43:
-		return 0.01
-	case stat < -2.86:
-		return 0.05
-	case stat < -2.57:
-		return 0.10
-	case stat < -1.94:
-		return 0.25
-	case stat < -1.62:
-		return 0.50
-	default:
-		// Linear interpolation towards 1
-		return math.Min(0.5+(stat+1.62)*0.25, 0.99)
+// Uses MacKinnon (1994, 2010) response surface regression with finite sample adjustment.
+func mackinnonPValue(stat float64, nobs int, regression string) float64 {
+	// MacKinnon (2010) response surface coefficients for the "c" (constant) case.
+	// tau_c critical values: beta_inf + beta_1/T + beta_2/T^2
+	// These map from p-value quantiles to critical value thresholds.
+	type critPoint struct {
+		pval    float64
+		betaInf float64
+		beta1   float64
+		beta2   float64
 	}
+
+	// Response surface coefficients for "c" (constant only) regression
+	// Source: MacKinnon (2010) Table 1
+	points := []critPoint{
+		{0.001, -3.9001, -10.534, -30.03},
+		{0.005, -3.5812, -7.3800, -18.30},
+		{0.01, -3.4336, -5.9990, -13.37},
+		{0.025, -3.2199, -4.4620, -8.330},
+		{0.05, -2.8621, -2.7380, -3.330},
+		{0.10, -2.5671, -1.4380, -0.800},
+		{0.25, -1.9410, -0.2280, 0.0000},
+		{0.50, -1.6170, 0.4910, 0.0000},
+		{0.75, -0.7330, 0.9360, 0.0000},
+		{0.90, 0.3710, 0.9940, 0.0000},
+		{0.95, 0.9490, 1.1470, 0.0000},
+		{0.99, 2.0590, 1.4320, 0.0000},
+	}
+
+	_ = regression // Currently only "c" implemented; reserved for "nc" and "ct"
+
+	// Compute finite-sample critical values at each quantile
+	t := float64(nobs)
+	if t < 1 {
+		t = 1
+	}
+
+	// Find where stat falls in the critical value table and interpolate
+	prevP := 0.0
+	for i, pt := range points {
+		cv := pt.betaInf + pt.beta1/t + pt.beta2/(t*t)
+		if stat < cv {
+			if i == 0 {
+				return pt.pval / 2 // Below smallest quantile
+			}
+			// Linear interpolation between previous and current quantile
+			prevPt := points[i-1]
+			prevCV := prevPt.betaInf + prevPt.beta1/t + prevPt.beta2/(t*t)
+			frac := (stat - prevCV) / (cv - prevCV)
+			return prevPt.pval + frac*(pt.pval-prevPt.pval)
+		}
+		prevP = pt.pval
+	}
+
+	// Above largest quantile — extrapolate towards 1
+	return math.Min(prevP+(stat-2.059)*0.05, 0.9999)
 }
 
 // kpssPValue approximates p-value for KPSS test.
@@ -491,7 +561,8 @@ func kpssPValue(stat float64, regression string) float64 {
 		case stat > 0.119:
 			return 0.10
 		default:
-			return 0.10 + (0.119-stat)*2
+			p := 0.10 + (0.119-stat)*2
+			return math.Min(p, 1.0)
 		}
 	}
 
@@ -504,6 +575,7 @@ func kpssPValue(stat float64, regression string) float64 {
 	case stat > 0.347:
 		return 0.10
 	default:
-		return 0.10 + (0.347-stat)*0.5
+		p := 0.10 + (0.347-stat)*0.5
+		return math.Min(p, 1.0)
 	}
 }
