@@ -129,21 +129,6 @@ func gamma(z float64) float64 {
 	return math.Gamma(z)
 }
 
-// lowerIncompleteGamma calculates the lower incomplete gamma function.
-func lowerIncompleteGamma(a, x float64) float64 {
-	if x < 0 || a <= 0 {
-		return 0
-	}
-
-	if x < a+1 {
-		return gammaIncSeries(a, x)
-	}
-	// For large x: γ(a,x) = Γ(a) - Γ_upper(a,x)
-	// Compute via regularized form to avoid precision loss
-	g := gamma(a)
-	return g - gammaIncCF(a, x)
-}
-
 // gammaIncSeries calculates incomplete gamma using series expansion.
 func gammaIncSeries(a, x float64) float64 {
 	if x == 0 {
