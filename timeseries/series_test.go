@@ -257,3 +257,107 @@ func TestCopy(t *testing.T) {
 		t.Errorf("Copy was modified when original changed")
 	}
 }
+
+func TestBoxCoxLambdaZero(t *testing.T) {
+	// lambda=0 should be equivalent to log
+	s := New([]float64{1, 2, 3, 4, 5})
+	bc := s.BoxCox(0)
+	lg := s.Log()
+
+	for i := range bc.Values {
+		if math.Abs(bc.Values[i]-lg.Values[i]) > 1e-10 {
+			t.Errorf("BoxCox(0) != Log at index %d: %f vs %f", i, bc.Values[i], lg.Values[i])
+		}
+	}
+}
+
+func TestBoxCoxLambdaOne(t *testing.T) {
+	// lambda=1: (y^1 - 1)/1 = y - 1
+	s := New([]float64{2, 4, 6, 8})
+	bc := s.BoxCox(1)
+
+	expected := []float64{1, 3, 5, 7}
+	for i, v := range bc.Values {
+		if math.Abs(v-expected[i]) > 1e-10 {
+			t.Errorf("BoxCox(1) at %d: got %f want %f", i, v, expected[i])
+		}
+	}
+}
+
+func TestBoxCoxRoundtrip(t *testing.T) {
+	s := New([]float64{1.5, 2.3, 5.7, 10.1, 0.3})
+	lambdas := []float64{-1, -0.5, 0, 0.25, 0.5, 1, 2}
+
+	for _, lambda := range lambdas {
+		transformed := s.BoxCox(lambda)
+		recovered := transformed.InverseBoxCox(lambda)
+
+		for i, v := range recovered.Values {
+			if math.IsNaN(v) || math.Abs(v-s.Values[i]) > 1e-8 {
+				t.Errorf("Roundtrip failed for lambda=%.2f at index %d: got %f want %f",
+					lambda, i, v, s.Values[i])
+			}
+		}
+	}
+}
+
+func TestBoxCoxNonPositive(t *testing.T) {
+	s := New([]float64{1, -2, 3})
+	bc := s.BoxCox(0.5)
+
+	if !math.IsNaN(bc.Values[1]) {
+		t.Errorf("Expected NaN for non-positive value, got %f", bc.Values[1])
+	}
+}
+
+func TestBoxCoxLambdaSelection(t *testing.T) {
+	// Exponential growth: lambda should be near 0 (log)
+	n := 200
+	vals := make([]float64, n)
+	for i := range vals {
+		vals[i] = math.Exp(float64(i) * 0.02)
+	}
+	s := New(vals)
+
+	lambda, err := BoxCoxLambda(s)
+	if err != nil {
+		t.Fatalf("BoxCoxLambda failed: %v", err)
+	}
+
+	if math.Abs(lambda) > 0.3 {
+		t.Errorf("Expected lambda near 0 for exponential data, got %f", lambda)
+	}
+	t.Logf("Exponential data: lambda = %f", lambda)
+}
+
+func TestBoxCoxLambdaLinear(t *testing.T) {
+	// Linear data with constant variance: lambda should be near 1
+	n := 200
+	vals := make([]float64, n)
+	for i := range vals {
+		vals[i] = 10 + float64(i)*0.1
+	}
+	s := New(vals)
+
+	lambda, err := BoxCoxLambda(s)
+	if err != nil {
+		t.Fatalf("BoxCoxLambda failed: %v", err)
+	}
+
+	if math.Abs(lambda-1) > 0.5 {
+		t.Errorf("Expected lambda near 1 for linear data, got %f", lambda)
+	}
+	t.Logf("Linear data: lambda = %f", lambda)
+}
+
+func TestInverseBoxCoxWithBias(t *testing.T) {
+	// Log case: E[exp(X)] = exp(mu + sigma²/2)
+	mu := 2.0
+	sigma2 := 0.5
+	result := InverseBoxCoxWithBias(mu, sigma2, 0)
+	expected := math.Exp(mu + sigma2/2)
+
+	if math.Abs(result-expected) > 1e-10 {
+		t.Errorf("Bias correction for lambda=0: got %f want %f", result, expected)
+	}
+}
