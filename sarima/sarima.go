@@ -5,6 +5,8 @@ import (
 	"errors"
 	"math"
 
+	"github.com/sartorproj/goarima/internal/optimize"
+	"github.com/sartorproj/goarima/internal/statespace"
 	"github.com/sartorproj/goarima/stats"
 	"github.com/sartorproj/goarima/timeseries"
 )
@@ -35,6 +37,7 @@ type Model struct {
 	AICc       float64 // Corrected AIC for small sample sizes
 	BIC        float64
 	LogLik     float64
+	Method     string // Estimation method: "css" (default) or "mle"
 	fitted     bool
 	data       *timeseries.Series
 	diffData   *timeseries.Series
@@ -48,7 +51,7 @@ type Model struct {
 	SMAStdErrors []float64
 }
 
-// New creates a new SARIMA model with the specified order.
+// New creates a new SARIMA model with CSS estimation (default).
 // Returns nil if any order is negative or period is non-positive.
 func New(p, d, q, sp, sd, sq, m int) *Model {
 	if p < 0 || d < 0 || q < 0 || sp < 0 || sd < 0 || sq < 0 || m <= 0 {
@@ -63,7 +66,19 @@ func New(p, d, q, sp, sd, sq, m int) *Model {
 		MACoeffs:  make([]float64, q),
 		SARCoeffs: make([]float64, sp),
 		SMACoeffs: make([]float64, sq),
+		Method:    "css",
 	}
+}
+
+// NewMLE creates a new SARIMA model with exact MLE estimation via Kalman filter.
+// Uses CSS as initial guess, then refines with Nelder-Mead + Kalman filter.
+// Recommended for models with MA components (q > 0 or SQ > 0).
+func NewMLE(p, d, q, sp, sd, sq, m int) *Model {
+	model := New(p, d, q, sp, sd, sq, m)
+	if model != nil {
+		model.Method = "mle"
+	}
+	return model
 }
 
 // Fit fits the SARIMA model to the given time series data.
@@ -103,10 +118,15 @@ func (m *Model) Fit(series *timeseries.Series) error {
 
 	m.diffData = diffSeries
 
-	// Fit the model
+	// Fit using CSS first (always, as initial guess for MLE)
 	err := m.fitCSS()
 	if err != nil {
 		return err
+	}
+
+	// If MLE requested, refine with Kalman filter + Nelder-Mead
+	if m.Method == "mle" {
+		m.fitMLE()
 	}
 
 	// Calculate information criteria
@@ -527,6 +547,198 @@ func (m *Model) estimateStdErrors(y []float64) {
 	m.SMAStdErrors = make([]float64, sq)
 	for i := 0; i < sq; i++ {
 		m.SMAStdErrors[i] = perturbAndCompute(m.SMACoeffs, i, true, false)
+	}
+}
+
+// expandedCoeffs computes the expanded AR and MA coefficient arrays from the
+// multiplicative polynomial product φ(B)·Φ(B^m) and θ(B)·Θ(B^m).
+// Returns dense slices indexed by lag (index 0 unused, coefficients at indices 1..maxLag).
+func (m *Model) expandedCoeffs() (ar, ma []float64) {
+	p := m.Order.P
+	q := m.Order.Q
+	sp := m.Order.SP
+	sq := m.Order.SQ
+	period := m.Order.M
+
+	maxARLag := p + sp*period
+	maxMALag := q + sq*period
+
+	ar = make([]float64, maxARLag+1)
+	for i := 0; i < p; i++ {
+		ar[i+1] += m.ARCoeffs[i]
+	}
+	for j := 0; j < sp; j++ {
+		ar[(j+1)*period] += m.SARCoeffs[j]
+	}
+	for i := 0; i < p; i++ {
+		for j := 0; j < sp; j++ {
+			ar[(i+1)+(j+1)*period] -= m.ARCoeffs[i] * m.SARCoeffs[j]
+		}
+	}
+
+	ma = make([]float64, maxMALag+1)
+	for i := 0; i < q; i++ {
+		ma[i+1] += m.MACoeffs[i]
+	}
+	for j := 0; j < sq; j++ {
+		ma[(j+1)*period] += m.SMACoeffs[j]
+	}
+	for i := 0; i < q; i++ {
+		for j := 0; j < sq; j++ {
+			ma[(i+1)+(j+1)*period] += m.MACoeffs[i] * m.SMACoeffs[j]
+		}
+	}
+
+	return ar, ma
+}
+
+// fitMLE refines CSS estimates using exact MLE via Kalman filter + Nelder-Mead.
+// Uses expanded multiplicative polynomials in state-space form.
+func (m *Model) fitMLE() {
+	y := m.diffData.Values
+	n := len(y)
+	p := m.Order.P
+	q := m.Order.Q
+	sp := m.Order.SP
+	sq := m.Order.SQ
+
+	nParams := p + q + sp + sq + 1
+	if n < nParams+5 {
+		return
+	}
+
+	// Build expanded ARMA for CSS baseline log-likelihood
+	cssAR, cssMA := m.expandedCoeffs()
+	cssARSlice := cssAR[1:] // skip index 0
+	cssMASlice := cssMA[1:]
+	cssSS := statespace.NewARMA(cssARSlice, cssMASlice, m.Intercept)
+	cssKalman := cssSS.Filter(y)
+	cssLogLik := cssKalman.LogLikelihood
+
+	// Pack parameters: [φ₁..φ_p, θ₁..θ_q, Φ₁..Φ_P, Θ₁..Θ_Q, μ]
+	x0 := make([]float64, nParams)
+	copy(x0[:p], m.ARCoeffs)
+	copy(x0[p:p+q], m.MACoeffs)
+	copy(x0[p+q:p+q+sp], m.SARCoeffs)
+	copy(x0[p+q+sp:p+q+sp+sq], m.SMACoeffs)
+	x0[nParams-1] = m.Intercept
+
+	period := m.Order.M
+
+	objective := func(params []float64) float64 {
+		arC := params[:p]
+		maC := params[p : p+q]
+		sarC := params[p+q : p+q+sp]
+		smaC := params[p+q+sp : p+q+sp+sq]
+		mu := params[nParams-1]
+
+		// Stationarity/invertibility check
+		absSum := 0.0
+		for _, v := range arC {
+			absSum += math.Abs(v)
+		}
+		for _, v := range sarC {
+			absSum += math.Abs(v)
+		}
+		if absSum >= 1.0 {
+			return 1e18
+		}
+		absSum = 0.0
+		for _, v := range maC {
+			absSum += math.Abs(v)
+		}
+		for _, v := range smaC {
+			absSum += math.Abs(v)
+		}
+		if absSum >= 1.0 {
+			return 1e18
+		}
+
+		// Expand multiplicative polynomials
+		maxARLag := p + sp*period
+		maxMALag := q + sq*period
+		expAR := make([]float64, maxARLag)
+		for i := 0; i < p; i++ {
+			expAR[i] += arC[i]
+		}
+		for j := 0; j < sp; j++ {
+			idx := (j+1)*period - 1
+			if idx < maxARLag {
+				expAR[idx] += sarC[j]
+			}
+		}
+		for i := 0; i < p; i++ {
+			for j := 0; j < sp; j++ {
+				idx := (i + 1) + (j+1)*period - 1
+				if idx < maxARLag {
+					expAR[idx] -= arC[i] * sarC[j]
+				}
+			}
+		}
+
+		expMA := make([]float64, maxMALag)
+		for i := 0; i < q; i++ {
+			expMA[i] += maC[i]
+		}
+		for j := 0; j < sq; j++ {
+			idx := (j+1)*period - 1
+			if idx < maxMALag {
+				expMA[idx] += smaC[j]
+			}
+		}
+		for i := 0; i < q; i++ {
+			for j := 0; j < sq; j++ {
+				idx := (i + 1) + (j+1)*period - 1
+				if idx < maxMALag {
+					expMA[idx] += maC[i] * smaC[j]
+				}
+			}
+		}
+
+		ss := statespace.NewARMA(expAR, expMA, mu)
+		result := ss.Filter(y)
+		if result.LogLikelihood == math.Inf(-1) || math.IsNaN(result.LogLikelihood) {
+			return 1e18
+		}
+		return -result.LogLikelihood
+	}
+
+	result := optimize.NelderMead(objective, x0, &optimize.Options{
+		MaxIter: 3000,
+		Tol:     1e-8,
+	})
+
+	mleLogLik := -result.Value
+	if mleLogLik > cssLogLik {
+		copy(m.ARCoeffs, result.X[:p])
+		copy(m.MACoeffs, result.X[p:p+q])
+		copy(m.SARCoeffs, result.X[p+q:p+q+sp])
+		copy(m.SMACoeffs, result.X[p+q+sp:p+q+sp+sq])
+		m.Intercept = result.X[nParams-1]
+
+		// Get variance from Kalman filter
+		expAR, expMA := m.expandedCoeffs()
+		ss := statespace.NewARMA(expAR[1:], expMA[1:], m.Intercept)
+		kResult := ss.Filter(y)
+		m.Variance = kResult.Sigma2
+		m.LogLik = kResult.LogLikelihood
+
+		// Recompute residuals and std errors
+		m.recomputeResiduals(y)
+		m.estimateStdErrors(y)
+	}
+}
+
+// recomputeResiduals recalculates residuals and fitted values with current coefficients.
+func (m *Model) recomputeResiduals(y []float64) {
+	n := len(y)
+	m.residuals = make([]float64, n)
+	m.fittedVals = make([]float64, n)
+
+	for t := 0; t < n; t++ {
+		pred := m.predict(t, y, m.residuals, m.Intercept)
+		m.fittedVals[t] = pred
+		m.residuals[t] = y[t] - pred
 	}
 }
 

@@ -65,6 +65,9 @@ type Config struct {
 	BoxCox       bool     // Apply Box-Cox variance stabilization before fitting (default: false)
 	BoxCoxLambda *float64 // Fixed lambda (nil = auto-select via profile likelihood; default: nil)
 
+	// Estimation method
+	UseMLE bool // Use exact MLE via Kalman filter instead of CSS (default: false)
+
 	// Trace/debug settings
 	Trace bool // Print progress (default: false)
 }
@@ -499,7 +502,12 @@ func fitBestARIMA(series *timeseries.Series, d int, config *Config) *ModelCandid
 		}
 		evaluated[spec] = true
 
-		model := arima.New(spec.p, d, spec.q)
+		var model *arima.Model
+		if config.UseMLE {
+			model = arima.NewMLE(spec.p, d, spec.q)
+		} else {
+			model = arima.New(spec.p, d, spec.q)
+		}
 		if err := model.Fit(series); err != nil {
 			continue
 		}
@@ -534,7 +542,12 @@ func fitBestARIMA(series *timeseries.Series, d int, config *Config) *ModelCandid
 				}
 				evaluated[spec] = true
 
-				model := arima.New(spec.p, d, spec.q)
+				var model *arima.Model
+				if config.UseMLE {
+					model = arima.NewMLE(spec.p, d, spec.q)
+				} else {
+					model = arima.New(spec.p, d, spec.q)
+				}
 				if err := model.Fit(series); err != nil {
 					continue
 				}
@@ -633,7 +646,12 @@ func fitBestSARIMA(series *timeseries.Series, d, sd, period int, config *Config)
 		}
 		evaluated[spec] = true
 
-		model := sarima.New(spec.p, d, spec.q, spec.sp, sd, spec.sq, period)
+		var model *sarima.Model
+		if config.UseMLE {
+			model = sarima.NewMLE(spec.p, d, spec.q, spec.sp, sd, spec.sq, period)
+		} else {
+			model = sarima.New(spec.p, d, spec.q, spec.sp, sd, spec.sq, period)
+		}
 		if err := model.Fit(series); err != nil {
 			continue
 		}
@@ -673,7 +691,12 @@ func fitBestSARIMA(series *timeseries.Series, d, sd, period int, config *Config)
 				}
 				evaluated[spec] = true
 
-				model := sarima.New(spec.p, d, spec.q, spec.sp, sd, spec.sq, period)
+				var model *sarima.Model
+				if config.UseMLE {
+					model = sarima.NewMLE(spec.p, d, spec.q, spec.sp, sd, spec.sq, period)
+				} else {
+					model = sarima.New(spec.p, d, spec.q, spec.sp, sd, spec.sq, period)
+				}
 				if err := model.Fit(series); err != nil {
 					continue
 				}

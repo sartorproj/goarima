@@ -331,3 +331,60 @@ func TestSARIMAQuarterlyData(t *testing.T) {
 	forecasts, _ := model.Predict(4)
 	t.Logf("Quarterly SARIMA - AIC: %f, Forecasts: %v", model.AIC, forecasts)
 }
+
+func TestSARIMAMLEAirlineModel(t *testing.T) {
+	// Airline model SARIMA(0,1,1)(0,1,1)[12] — pure MA, benefits most from MLE
+	n := 144
+	values := make([]float64, n)
+	theta := 0.4
+	Theta := 0.6
+	rng := uint64(77)
+	eps := make([]float64, n+13)
+	for i := range eps {
+		rng = rng*6364136223846793005 + 1442695040888963407
+		eps[i] = float64(int64(rng>>33)-int64(1<<30)) / float64(1<<30)
+	}
+
+	// Generate: (1-B)(1-B^12)y_t = (1+θB)(1+ΘB^12)ε_t
+	diff := make([]float64, n)
+	for i := 0; i < n; i++ {
+		diff[i] = eps[i+13] + theta*eps[i+12] + Theta*eps[i+1] + theta*Theta*eps[i]
+	}
+	// Integrate: seasonal then regular
+	seasonalInt := make([]float64, n+12)
+	for i := 0; i < 12; i++ {
+		seasonalInt[i] = 100 + float64(i%12)*2
+	}
+	for i := 0; i < n; i++ {
+		seasonalInt[i+12] = diff[i] + seasonalInt[i]
+	}
+	regularInt := make([]float64, len(seasonalInt)+1)
+	regularInt[0] = 100
+	for i := range seasonalInt {
+		regularInt[i+1] = seasonalInt[i] + regularInt[i]
+	}
+	// Use the last n values
+	for i := 0; i < n; i++ {
+		values[i] = regularInt[len(regularInt)-n+i]
+	}
+
+	series := timeseries.New(values)
+
+	cssModel := New(0, 1, 1, 0, 1, 1, 12)
+	if err := cssModel.Fit(series); err != nil {
+		t.Fatalf("CSS fit failed: %v", err)
+	}
+
+	mleModel := NewMLE(0, 1, 1, 0, 1, 1, 12)
+	if err := mleModel.Fit(series); err != nil {
+		t.Fatalf("MLE fit failed: %v", err)
+	}
+
+	t.Logf("True: θ=%.2f, Θ=%.2f", theta, Theta)
+	t.Logf("CSS: θ=%.4f, Θ=%.4f, loglik=%.2f", cssModel.MACoeffs[0], cssModel.SMACoeffs[0], cssModel.LogLik)
+	t.Logf("MLE: θ=%.4f, Θ=%.4f, loglik=%.2f", mleModel.MACoeffs[0], mleModel.SMACoeffs[0], mleModel.LogLik)
+
+	if mleModel.Method != "mle" {
+		t.Error("Expected method=mle")
+	}
+}
