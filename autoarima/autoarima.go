@@ -1001,7 +1001,6 @@ func formatSARIMAOrder(p, d, q, sp, sd, sq, m int) string {
 		strconv.Itoa(sp) + "," + strconv.Itoa(sd) + "," + strconv.Itoa(sq) + ")[" + strconv.Itoa(m) + "]"
 }
 
-
 // Predict generates forecasts using the selected model.
 func (r *Result) Predict(steps int) ([]float64, error) {
 	if r.IsSeasonal && r.SeasonalModel != nil {

@@ -494,10 +494,10 @@ func mackinnonPValue(stat float64, nobs int, regression string) float64 {
 	// tau_c critical values: beta_inf + beta_1/T + beta_2/T^2
 	// These map from p-value quantiles to critical value thresholds.
 	type critPoint struct {
-		pval     float64
-		betaInf  float64
-		beta1    float64
-		beta2    float64
+		pval    float64
+		betaInf float64
+		beta1   float64
+		beta2   float64
 	}
 
 	// Response surface coefficients for "c" (constant only) regression
