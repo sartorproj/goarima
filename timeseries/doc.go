@@ -48,6 +48,14 @@
 //	normalized := series.Normalize() // Z-score normalization
 //	ma := series.MovingAverage(7)   // Moving average
 //
+//	// Box-Cox variance-stabilizing transformation
+//	lambda, err := timeseries.BoxCoxLambda(series) // Auto-select lambda
+//	if err != nil {
+//	    log.Fatal(err)
+//	}
+//	transformed := series.BoxCox(lambda)           // Apply transformation
+//	recovered := transformed.InverseBoxCox(lambda) // Reverse transformation
+//
 // # Slicing and Manipulation
 //
 // Work with subsets of the data:

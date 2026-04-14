@@ -293,6 +293,190 @@ func (s *Series) Log() *Series {
 	}
 }
 
+// BoxCox applies the Box-Cox power transformation with parameter lambda.
+//
+//	lambda = 0: log(y)
+//	lambda != 0: (y^lambda - 1) / lambda
+//
+// All values must be positive. Returns NaN for non-positive values.
+func (s *Series) BoxCox(lambda float64) *Series {
+	result := make([]float64, len(s.Values))
+	for i, v := range s.Values {
+		if v <= 0 {
+			result[i] = math.NaN()
+			continue
+		}
+		if math.Abs(lambda) < 1e-12 {
+			result[i] = math.Log(v)
+		} else {
+			result[i] = (math.Pow(v, lambda) - 1) / lambda
+		}
+	}
+
+	timestamps := make([]time.Time, len(s.Timestamps))
+	copy(timestamps, s.Timestamps)
+
+	return &Series{
+		Timestamps: timestamps,
+		Values:     result,
+		Name:       s.Name + "_boxcox",
+	}
+}
+
+// InverseBoxCox reverses the Box-Cox transformation.
+//
+//	lambda = 0: exp(y)
+//	lambda != 0: (lambda*y + 1)^(1/lambda)
+func (s *Series) InverseBoxCox(lambda float64) *Series {
+	result := make([]float64, len(s.Values))
+	for i, v := range s.Values {
+		if math.Abs(lambda) < 1e-12 {
+			result[i] = math.Exp(v)
+		} else {
+			inner := lambda*v + 1
+			if inner <= 0 {
+				result[i] = math.NaN()
+			} else {
+				result[i] = math.Pow(inner, 1/lambda)
+			}
+		}
+	}
+
+	timestamps := make([]time.Time, len(s.Timestamps))
+	copy(timestamps, s.Timestamps)
+
+	return &Series{
+		Timestamps: timestamps,
+		Values:     result,
+		Name:       s.Name + "_inv_boxcox",
+	}
+}
+
+// InverseBoxCoxValue applies the inverse Box-Cox transformation to a single scalar value.
+func InverseBoxCoxValue(value, lambda float64) float64 {
+	if math.Abs(lambda) < 1e-12 {
+		return math.Exp(value)
+	}
+	inner := lambda*value + 1
+	if inner <= 0 {
+		return math.NaN()
+	}
+	return math.Pow(inner, 1/lambda)
+}
+
+// InverseBoxCoxWithBias applies bias-corrected inverse Box-Cox transformation.
+// Standard inverse is biased: E[g⁻¹(X)] ≠ g⁻¹(E[X]) for nonlinear g.
+// Correction: ŷ = g⁻¹(μ) · [1 + σ²·(1-λ) / (2·g⁻¹(μ)^(2λ))]
+// Use this for back-transforming forecasts with known prediction variance.
+func InverseBoxCoxWithBias(value, variance, lambda float64) float64 {
+	if math.Abs(lambda) < 1e-12 {
+		// Log case: E[exp(X)] = exp(μ + σ²/2)
+		return math.Exp(value + variance/2)
+	}
+	inner := lambda*value + 1
+	if inner <= 0 {
+		return math.NaN()
+	}
+	base := math.Pow(inner, 1/lambda)
+	correction := 1 + variance*(1-lambda)/(2*inner*inner)
+	return base * correction
+}
+
+// BoxCoxLambda finds the optimal Box-Cox lambda via profile log-likelihood.
+// Searches lambda in [-1, 2]. All series values must be positive.
+// Prefers "round" lambdas (0, 0.5, 1, -1) if they're within tolerance of optimal.
+func BoxCoxLambda(series *Series) (float64, error) {
+	n := len(series.Values)
+	if n < 4 {
+		return 1, errors.New("series too short for Box-Cox lambda selection")
+	}
+
+	// Check all positive
+	for _, v := range series.Values {
+		if v <= 0 || math.IsNaN(v) || math.IsInf(v, 0) {
+			return 1, errors.New("Box-Cox requires all positive, finite values")
+		}
+	}
+
+	// Precompute log-sum for the Jacobian term
+	logSum := 0.0
+	for _, v := range series.Values {
+		logSum += math.Log(v)
+	}
+
+	// Profile log-likelihood for Box-Cox:
+	// L(λ) = -n/2 · log(var(z)) + (λ-1) · Σlog(y_i)
+	// where z is the transformed series
+	bestLambda := 1.0
+	bestLL := math.Inf(-1)
+
+	for li := -100; li <= 200; li++ {
+		lambda := float64(li) / 100.0
+
+		// Transform
+		var sumZ, sumZ2 float64
+		valid := true
+		for _, v := range series.Values {
+			var z float64
+			if math.Abs(lambda) < 1e-12 {
+				z = math.Log(v)
+			} else {
+				z = (math.Pow(v, lambda) - 1) / lambda
+			}
+			if math.IsNaN(z) || math.IsInf(z, 0) {
+				valid = false
+				break
+			}
+			sumZ += z
+			sumZ2 += z * z
+		}
+		if !valid {
+			continue
+		}
+
+		meanZ := sumZ / float64(n)
+		varZ := sumZ2/float64(n) - meanZ*meanZ
+		if varZ <= 0 {
+			continue
+		}
+
+		ll := -float64(n)/2*math.Log(varZ) + (lambda-1)*logSum
+		if ll > bestLL {
+			bestLL = ll
+			bestLambda = lambda
+		}
+	}
+
+	// Prefer round values if within tolerance of optimal
+	roundValues := []float64{-1, -0.5, 0, 1.0 / 3.0, 0.5, 1, 2}
+	for _, rv := range roundValues {
+		// Evaluate log-likelihood at round value
+		var sumZ, sumZ2 float64
+		for _, v := range series.Values {
+			var z float64
+			if math.Abs(rv) < 1e-12 {
+				z = math.Log(v)
+			} else {
+				z = (math.Pow(v, rv) - 1) / rv
+			}
+			sumZ += z
+			sumZ2 += z * z
+		}
+		meanZ := sumZ / float64(n)
+		varZ := sumZ2/float64(n) - meanZ*meanZ
+		if varZ <= 0 {
+			continue
+		}
+		ll := -float64(n)/2*math.Log(varZ) + (rv-1)*logSum
+		if bestLL-ll < 0.5 { // within 0.5 log-lik units
+			bestLambda = rv
+			bestLL = ll
+		}
+	}
+
+	return bestLambda, nil
+}
+
 // MovingAverage calculates a simple moving average with window size.
 func (s *Series) MovingAverage(window int) *Series {
 	if window <= 0 || window > len(s.Values) {

@@ -9,6 +9,7 @@
 package autoarima
 
 import (
+	"fmt"
 	"math"
 	"sort"
 	"strconv"
@@ -59,6 +60,10 @@ type Config struct {
 	CompareModels    bool    // Compare seasonal vs non-seasonal (default: true)
 	PreferSimpler    bool    // Prefer simpler model if CV scores are close (default: true)
 	SimplerThreshold float64 // RMSE difference threshold to prefer simpler model (default: 0.05)
+
+	// Box-Cox transformation
+	BoxCox       bool     // Apply Box-Cox variance stabilization before fitting (default: false)
+	BoxCoxLambda *float64 // Fixed lambda (nil = auto-select via profile likelihood; default: nil)
 
 	// Trace/debug settings
 	Trace bool // Print progress (default: false)
@@ -172,6 +177,10 @@ type Result struct {
 	SuggestedSP int
 	SuggestedSQ int
 
+	// Box-Cox diagnostics
+	UsedBoxCox   bool    // Whether Box-Cox was applied
+	BoxCoxLambda float64 // Lambda used (0 if not applied)
+
 	// Model comparison (all candidates evaluated)
 	Candidates []ModelCandidate
 }
@@ -202,38 +211,65 @@ func AutoARIMA(series *timeseries.Series, config *Config) (*Result, error) {
 		return nil, nil
 	}
 
+	// Step 0: Apply Box-Cox transformation if enabled
+	var bcLambda float64
+	var fitErrors []string
+	usedBoxCox := false
+	fitSeries := series
+	if config.BoxCox {
+		bcOK := true
+		if config.BoxCoxLambda != nil {
+			bcLambda = *config.BoxCoxLambda
+			if math.IsNaN(bcLambda) || math.IsInf(bcLambda, 0) {
+				fitErrors = append(fitErrors, fmt.Sprintf("Box-Cox: invalid lambda %v, skipping transformation", bcLambda))
+				bcOK = false
+			}
+		} else {
+			var err error
+			bcLambda, err = timeseries.BoxCoxLambda(series)
+			if err != nil {
+				fitErrors = append(fitErrors, fmt.Sprintf("Box-Cox: auto-lambda failed (%v), skipping transformation", err))
+				bcOK = false
+			}
+		}
+		if bcOK {
+			fitSeries = series.BoxCox(bcLambda)
+			usedBoxCox = true
+		}
+	}
+
 	// Step 1: Detect seasonality if enabled
 	detectedPeriod := 0
 	seasonalityStrength := 0.0
 	detectionMethod := "none"
 
 	if config.AutoSeasonal {
-		detectedPeriod, seasonalityStrength = detectSeasonalPeriod(series, config)
+		detectedPeriod, seasonalityStrength = detectSeasonalPeriod(fitSeries, config)
 		if detectedPeriod > 0 {
 			detectionMethod = "acf"
 		}
 	}
 
 	// Step 2: Determine differencing orders
-	d := determineDifferencing(series, config.MaxD, config.StationTest)
+	d := determineDifferencing(fitSeries, config.MaxD, config.StationTest)
 
 	sd := 0
 	if detectedPeriod > 0 && n >= detectedPeriod*2 {
-		sd = determineSeasonalDifferencing(series, config.MaxSD, detectedPeriod)
+		sd = determineSeasonalDifferencing(fitSeries, config.MaxSD, detectedPeriod)
 	}
 
 	// Step 3: Fit candidate models
 	var candidates []ModelCandidate
 
 	// Always fit non-seasonal ARIMA as baseline
-	arimaCandidate := fitBestARIMA(series, d, config)
+	arimaCandidate := fitBestARIMA(fitSeries, d, config)
 	if arimaCandidate != nil {
 		candidates = append(candidates, *arimaCandidate)
 	}
 
 	// Fit seasonal SARIMA if seasonality detected
 	if detectedPeriod > 0 && n >= detectedPeriod*2 && config.CompareModels {
-		sarimaCandidate := fitBestSARIMA(series, d, sd, detectedPeriod, config)
+		sarimaCandidate := fitBestSARIMA(fitSeries, d, sd, detectedPeriod, config)
 		if sarimaCandidate != nil {
 			candidates = append(candidates, *sarimaCandidate)
 		}
@@ -246,7 +282,7 @@ func AutoARIMA(series *timeseries.Series, config *Config) (*Result, error) {
 	// Step 4: Evaluate candidates using cross-validation
 	if config.ModelSelection == "cv" {
 		for i := range candidates {
-			evaluateWithCV(series, &candidates[i], config)
+			evaluateWithCV(fitSeries, series, &candidates[i], config, usedBoxCox, bcLambda)
 		}
 	}
 
@@ -274,6 +310,9 @@ func AutoARIMA(series *timeseries.Series, config *Config) (*Result, error) {
 		DetectedPeriod:      detectedPeriod,
 		SeasonalityStrength: seasonalityStrength,
 		DetectionMethod:     detectionMethod,
+		UsedBoxCox:          usedBoxCox,
+		BoxCoxLambda:        bcLambda,
+		FitErrors:           fitErrors,
 		Candidates:          candidates,
 	}
 
@@ -675,7 +714,7 @@ func fitBestSARIMA(series *timeseries.Series, d, sd, period int, config *Config)
 
 // evaluateWithCV evaluates a candidate using expanding-window time series cross-validation.
 // Uses multiple folds (rolling origin) for robust out-of-sample evaluation.
-func evaluateWithCV(series *timeseries.Series, candidate *ModelCandidate, config *Config) {
+func evaluateWithCV(series, originalSeries *timeseries.Series, candidate *ModelCandidate, config *Config, usedBoxCox bool, bcLambda float64) {
 	n := series.Len()
 	folds := config.CVFolds
 	if folds < 1 {
@@ -739,8 +778,19 @@ func evaluateWithCV(series *timeseries.Series, candidate *ModelCandidate, config
 			continue
 		}
 
-		rmse, mae, mape := calculateMetrics(test.Values, forecasts)
-		if !math.IsInf(rmse, 1) {
+		// Back-transform forecasts to original scale for metric computation
+		actualValues := test.Values
+		if usedBoxCox {
+			backTransformed := make([]float64, len(forecasts))
+			for i, f := range forecasts {
+				backTransformed[i] = timeseries.InverseBoxCoxValue(f, bcLambda)
+			}
+			forecasts = backTransformed
+			actualValues = originalSeries.Slice(origin, min(origin+horizon, n)).Values
+		}
+
+		rmse, mae, mape := calculateMetrics(actualValues, forecasts)
+		if !math.IsInf(rmse, 1) && !math.IsNaN(rmse) && !math.IsNaN(mae) && !math.IsNaN(mape) {
 			totalRMSE += rmse
 			totalMAE += mae
 			totalMAPE += mape
@@ -1003,26 +1053,45 @@ func formatSARIMAOrder(p, d, q, sp, sd, sq, m int) string {
 
 // Predict generates forecasts using the selected model.
 func (r *Result) Predict(steps int) ([]float64, error) {
-	if r.IsSeasonal && r.SeasonalModel != nil {
-		return r.SeasonalModel.Predict(steps)
-	}
-	if r.Model != nil {
-		return r.Model.Predict(steps)
-	}
-	return nil, nil
+	forecasts, _, _, err := r.PredictWithInterval(steps, 0.95)
+	return forecasts, err
 }
 
 // PredictWithInterval generates forecasts with confidence intervals at a single level.
 // Returns point forecasts, lower bounds, and upper bounds.
-// Common confidence levels: 0.80 (80%), 0.90 (90%), 0.95 (95%), 0.99 (99%)
+// If Box-Cox was applied, forecasts and intervals are automatically back-transformed
+// with bias correction.
 func (r *Result) PredictWithInterval(steps int, confidence float64) (forecast, lower, upper []float64, err error) {
-	if r.IsSeasonal && r.SeasonalModel != nil {
-		return r.SeasonalModel.PredictWithInterval(steps, confidence)
+	switch {
+	case r.IsSeasonal && r.SeasonalModel != nil:
+		forecast, lower, upper, err = r.SeasonalModel.PredictWithInterval(steps, confidence)
+	case r.Model != nil:
+		forecast, lower, upper, err = r.Model.PredictWithInterval(steps, confidence)
+	default:
+		return nil, nil, nil, nil
 	}
-	if r.Model != nil {
-		return r.Model.PredictWithInterval(steps, confidence)
+	if err != nil || !r.UsedBoxCox {
+		return
 	}
-	return nil, nil, nil, nil
+
+	// Back-transform from Box-Cox scale to original scale
+	lambda := r.BoxCoxLambda
+	for i := range forecast {
+		// Compute variance on transformed scale from interval width
+		// se ≈ (upper - lower) / (2 * z)
+		se := (upper[i] - lower[i]) / (2 * stats.NormalQuantile((1+confidence)/2))
+		variance := se * se
+
+		// Bias-corrected back-transform for point forecast
+		forecast[i] = timeseries.InverseBoxCoxWithBias(forecast[i], variance, lambda)
+
+		// Back-transform interval bounds (no bias correction for bounds)
+		lSeries := timeseries.New([]float64{lower[i]})
+		uSeries := timeseries.New([]float64{upper[i]})
+		lower[i] = lSeries.InverseBoxCox(lambda).Values[0]
+		upper[i] = uSeries.InverseBoxCox(lambda).Values[0]
+	}
+	return
 }
 
 // ForecastResult contains forecasts with multiple confidence interval levels.
